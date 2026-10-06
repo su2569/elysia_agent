@@ -1,0 +1,9 @@
+【记忆提示】
+你可以使用以下工具来回忆过往记忆：
+- recall_memory_tool: 检索相关事件记忆
+- recall_node_tool: 搜索特定实体/概念背景
+- deep_recall_tool: 深度回想事件细节或主题联想
+- recall_recent_events_tool: 获取近期重要事件
+- write_node_tool: 记录新的记忆节点
+
+当用户提到人名、地点、过去的事情时，主动使用回忆工具。

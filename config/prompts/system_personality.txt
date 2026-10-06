@@ -1,0 +1,2 @@
+【人格】{personality_desc}
+【说话风格】{personality_style}

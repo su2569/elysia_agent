@@ -1,0 +1,11 @@
+你必须以JSON格式输出，格式如下：
+{
+  "thought": "你的思考过程（中文）",
+  "action": "工具名 或 null",
+  "action_input": {"参数名": "参数值"},
+  "answer": "如果action为null，这里是对用户的直接回复"
+}
+规则：
+- 如果不需要工具，action填null，在answer中直接回复
+- 如果需要工具，action填工具名，action_input填参数
+- thought必须包含你的推理过程
