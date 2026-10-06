@@ -147,11 +147,14 @@ class ToolRegistry:
     @classmethod
     def _save_persisted_commands(cls) -> None:
         import os as _os, json as _json
+        from pathlib import Path
         path = cls._commands_path()
         try:
             _os.makedirs(_os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                _json.dump(cls._get_default()._commands, f, ensure_ascii=False, indent=2)
+            Path(path).write_text(
+                _json.dumps(cls._get_default()._commands, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 

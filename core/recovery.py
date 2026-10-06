@@ -65,9 +65,12 @@ class ModuleRecovery:
 
     def _save(self) -> None:
         try:
+            from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.report_file, "w", encoding="utf-8") as f:
-                json.dump({"crashes": self._crashes[-100:]}, f, ensure_ascii=False, indent=2)
+            Path(self.report_file).write_text(
+                json.dumps({"crashes": self._crashes[-100:]}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 

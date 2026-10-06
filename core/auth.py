@@ -115,6 +115,7 @@ class AuthManager:
 
     def _save(self) -> None:
         try:
+            from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
             data = {
                 "roles": self._roles,
@@ -129,8 +130,10 @@ class AuthManager:
                     for r in self._pending.values()
                 ],
             }
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            Path(self.state_file).write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception as e:
             logger.warning(f"Failed to save auth state: {e}")
 

@@ -155,9 +155,12 @@ class PluginManager:
     def _save_persisted_state(self) -> None:
         """保存插件状态到磁盘"""
         try:
+            from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(self._persisted, f, ensure_ascii=False, indent=2)
+            Path(self.state_file).write_text(
+                json.dumps(self._persisted, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception as e:
             logger.warning(f"Failed to save plugin state: {e}")
 
@@ -175,6 +178,7 @@ class PluginManager:
 
     def _save_swap_snapshot(self, info: PluginInfo) -> None:
         """保存插件 SWAP 快照（元信息 + 配置）"""
+        from pathlib import Path
         os.makedirs(self._swap_dir(), exist_ok=True)
         snapshot = {
             "name": info.name,
@@ -186,8 +190,10 @@ class PluginManager:
             "plugin_dir": info.plugin_dir,
             "kind": info.kind,
         }
-        with open(self._swap_file(info.name), "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        Path(self._swap_file(info.name)).write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _load_swap_snapshot(self, name: str) -> Optional[PluginInfo]:
         """读取插件 SWAP 快照"""

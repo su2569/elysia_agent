@@ -318,11 +318,12 @@ class Settings:
             data.pop("concurrency", None)
         if not path.endswith((".json", ".yaml", ".yml")):
             path = path + ".json"
-        with open(path, "w", encoding="utf-8") as f:
-            if path.endswith((".yaml", ".yml")):
-                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
-            else:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+        from pathlib import Path
+        if path.endswith((".yaml", ".yml")):
+            text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        else:
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+        Path(path).write_text(text, encoding="utf-8")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":

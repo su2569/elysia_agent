@@ -172,12 +172,12 @@ class SelfCheckMonitor:
         return CheckItem("dependencies", True, "核心依赖可用")
 
     def _check_data_dir(self) -> CheckItem:
+        from pathlib import Path
         from ..utils.paths import safe_join
         try:
             os.makedirs(self.data_dir, exist_ok=True)
             probe = safe_join(self.data_dir, ".self_check_probe")
-            with open(probe, "w") as f:
-                f.write("ok")
+            Path(probe).write_text("ok", encoding="utf-8")
             os.remove(probe)
             return CheckItem("data_dir", True, f"{self.data_dir} 可写")
         except Exception as e:
@@ -230,11 +230,11 @@ class SelfCheckMonitor:
 
     def _check_tempdir(self) -> CheckItem:
         import tempfile
+        from pathlib import Path
         tmp = tempfile.gettempdir()
         try:
             probe = os.path.join(tmp, f".elysia_probe_{os.getpid()}")
-            with open(probe, "w") as f:
-                f.write("ok")
+            Path(probe).write_text("ok", encoding="utf-8")
             os.remove(probe)
             return CheckItem("tempdir", True, f"临时目录可写且正常: {tmp}")
         except Exception as e:
@@ -307,13 +307,16 @@ class SelfCheckMonitor:
 
     def _save_report(self) -> None:
         try:
+            from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
             data = {
                 "timestamp": time.time(),
                 "blocked_events": self._blocked_events[-200:],
             }
-            with open(self.report_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            Path(self.report_file).write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 

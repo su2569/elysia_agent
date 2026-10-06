@@ -182,8 +182,8 @@ class OneBotWSAdapter(BasePlatformAdapter):
             logger.debug(f"Ignore message from non-whitelisted group: {group_id}")
             return
 
-        # 提取纯文本
-        content = self._extract_text(evt.get("message", evt.get("raw_message", "")))
+        # 提取纯文本与图片
+        content, images = self._extract_text_and_images(evt.get("message", evt.get("raw_message", "")))
 
         bot_msg = BotMessage(
             platform=self.platform_type,
@@ -192,6 +192,7 @@ class OneBotWSAdapter(BasePlatformAdapter):
             timestamp=time.time(),
             user_id=user_id,
             content=content,
+            images=images,
             group_id=group_id if msg_type == "group" else None,
             is_group=msg_type == "group",
             at_bot=self._is_at_bot(evt),
@@ -205,9 +206,15 @@ class OneBotWSAdapter(BasePlatformAdapter):
 
     def _extract_text(self, message) -> str:
         """从 OneBot 消息段提取纯文本"""
+        text, _ = self._extract_text_and_images(message)
+        return text
+
+    def _extract_text_and_images(self, message):
+        """提取纯文本与图片 URL 列表"""
         if isinstance(message, str):
-            return message
+            return message, []
         parts = []
+        images = []
         if isinstance(message, list):
             for seg in message:
                 if isinstance(seg, dict):
@@ -215,11 +222,14 @@ class OneBotWSAdapter(BasePlatformAdapter):
                         parts.append(seg.get("data", {}).get("text", ""))
                     elif seg.get("type") == "image":
                         parts.append("[图片]")
+                        f = seg.get("data", {}).get("file", "") or seg.get("data", {}).get("url", "")
+                        if f:
+                            images.append(f)
                     elif seg.get("type") == "at":
                         parts.append(f"@{seg.get('data', {}).get('qq', '')}")
                     else:
                         parts.append(f"[{seg.get('type', 'msg')}]")
-        return "".join(parts)
+        return "".join(parts), images
 
     def _is_at_bot(self, evt: dict) -> bool:
         """检查是否 @了 Bot"""

@@ -432,13 +432,16 @@ class PromptManager:
 
     def _save_stats(self) -> None:
         try:
+            from pathlib import Path
             os.makedirs(os.path.dirname(self._stats_file), exist_ok=True)
             data = {
                 key: {"usage_count": s.usage_count, "last_used": s.last_used}
                 for key, s in self._segments.items() if s.usage_count > 0
             }
-            with open(self._stats_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            Path(self._stats_file).write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
