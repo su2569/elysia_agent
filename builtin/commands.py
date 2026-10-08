@@ -17,6 +17,7 @@ import time
 from typing import Dict, Any, Optional, Callable, Awaitable
 
 from ..utils.logger import get_logger
+from ..core.cmd_grade import CommandGrade, check_command_access, describe
 
 logger = get_logger("Commands")
 
@@ -28,12 +29,14 @@ class CommandContext:
     """命令上下文：命令处理器收到的参数"""
 
     def __init__(self, user_id: str, query: str, group_id: Optional[str] = None,
-                 platform: str = "unknown", runner=None):
+                 platform: str = "unknown", runner=None, role=None):
         self.user_id = user_id
         self.query = query
         self.group_id = group_id
         self.platform = platform
         self.runner = runner
+        # 阶段三：用户当前权限档（CommandGrade / UserRole / int，用于命令分级）
+        self.role = role
 
     @property
     def parts(self) -> list:
@@ -49,19 +52,22 @@ class CommandHandler:
         self.prefix = prefix
         self._commands: Dict[str, Dict[str, Any]] = {}
         # 注册内置命令
-        for name, fn, desc in self._builtin_commands():
-            self.register(name, fn, desc)
+        for name, fn, desc, grade in self._builtin_commands():
+            self.register(name, fn, desc, grade=grade)
 
     # ==================== 注册 ====================
 
     def register(self, name: str, fn: Callable[[CommandContext], Awaitable[Optional[str]]],
-                 description: str = "", hidden: bool = False) -> None:
+                 description: str = "", hidden: bool = False,
+                 grade: int = CommandGrade.USER) -> None:
         """注册命令
 
         fn: async (ctx: CommandContext) -> Optional[str]，返回 None 表示不处理。
+        grade: 阶段三 - 命令所需最低权限档（CommandGrade，默认 USER）。
+               低于该档的调用者在 handle() 会被拒绝。
         """
         self._commands[name.lstrip(self.prefix)] = {
-            "fn": fn, "description": description, "hidden": hidden,
+            "fn": fn, "description": description, "hidden": hidden, "grade": int(grade),
         }
 
     def unregister(self, name: str) -> bool:
@@ -74,7 +80,11 @@ class CommandHandler:
 
     def list_commands(self) -> list:
         return [
-            {"name": "/" + name, "description": info["description"]}
+            {
+                "name": "/" + name,
+                "description": info["description"],
+                "grade": info.get("grade", CommandGrade.USER),
+            }
             for name, info in sorted(self._commands.items())
             if not info["hidden"]
         ]
@@ -105,6 +115,30 @@ class CommandHandler:
 
         ctx = CommandContext(user_id=user_id, query=stripped, group_id=group_id,
                              platform=platform, runner=self.runner)
+
+        # 阶段三：命令执行分级鉴权（未接入 auth 时按 GUEST 兜底，仍会拦截高等级命令）
+        role = None
+        auth = getattr(self.runner, "auth", None) if self.runner is not None else None
+        if auth is not None and hasattr(auth, "get_role"):
+            try:
+                role = auth.get_role(user_id)
+            except Exception:
+                role = None
+        if role is None:
+            # 兜底：无权限系统时，默认给最低档（游客），管理员类命令不可用
+            from ..core.cmd_grade import CommandGrade as _CG
+            role = _CG.GUEST
+        ctx.role = role
+
+        required = info.get("grade", CommandGrade.USER)
+        allowed, reason = check_command_access(role, required)
+        if not allowed:
+            logger.info(f"命令 /{cmd_name} 分级拦截: {user_id} -> {reason}")
+            return {
+                "text": reason, "success": False,
+                "error": "command_grade_denied", "is_command": True,
+            }
+
         try:
             reply = await info["fn"](ctx)
         except Exception as e:
@@ -121,21 +155,24 @@ class CommandHandler:
     # ==================== 内置命令 ====================
 
     def _builtin_commands(self) -> list:
+        # 阶段三：为内置命令声明所需最低权限档（grade）
+        #   GUEST - 只读/可见；USER - 普通用户（改自己数据）；ADMIN - 管理员
+        G = CommandGrade
         return [
-            ("help", self._cmd_help, "显示可用命令列表"),
-            ("status", self._cmd_status, "查看运行状态"),
-            ("stats", self._cmd_stats, "查看运行统计"),
-            ("memory", self._cmd_memory, "查看记忆概览"),
-            ("clear", self._cmd_clear, "清空我的记忆"),
-            ("reset", self._cmd_reset, "重置当前会话"),
-            ("guard", self._cmd_guard, "查看防护状态"),
-            ("version", self._cmd_version, "查看版本信息"),
+            ("help", self._cmd_help, "显示可用命令列表", G.GUEST),
+            ("status", self._cmd_status, "查看运行状态", G.GUEST),
+            ("stats", self._cmd_stats, "查看运行统计", G.GUEST),
+            ("version", self._cmd_version, "查看版本信息", G.GUEST),
+            ("memory", self._cmd_memory, "查看记忆概览", G.USER),
+            ("clear", self._cmd_clear, "清空我的记忆", G.USER),
+            ("reset", self._cmd_reset, "重置当前会话", G.USER),
+            ("guard", self._cmd_guard, "查看防护状态", G.ADMIN),
         ]
 
     async def _cmd_help(self, ctx: CommandContext) -> str:
         lines = ["可用命令："]
         for cmd in self.list_commands():
-            lines.append(f"  {cmd['name']} - {cmd['description']}")
+            lines.append(f"  {cmd['name']} - {cmd['description']} {describe(cmd['grade'])}")
         return "\n".join(lines)
 
     async def _cmd_status(self, ctx: CommandContext) -> str:

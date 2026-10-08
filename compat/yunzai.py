@@ -267,14 +267,16 @@ class YunzaiCompatAdapter:
         await adapter.unload_all()                 # 停止 Node 宿主
     """
 
-    def __init__(self, plugins_dir: str = "./compat/yunzai_plugins",
-                 node_bin: str = "node"):
+    def __init__(self, plugins_dir: str = "./plugins",
+                 node_bin: str = "node", include_dirs: Optional[List[str]] = None):
         self.plugins_dir = plugins_dir
         self.node_bin = node_bin
+        self.include_dirs = include_dirs  # 仅加载这些目录（PluginManager 按 kind 过滤）
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._msg_id = 0
         self._lock = asyncio.Lock()
         self._loaded_plugins = 0
+        self.load_progress: List[Dict[str, Any]] = []   # 加载过程（每插件状态/实例数）
         self._pending: Dict[int, asyncio.Future] = {}
 
     def _node_available(self) -> bool:
@@ -288,13 +290,16 @@ class YunzaiCompatAdapter:
     def discover(self) -> List[str]:
         if not os.path.isdir(self.plugins_dir):
             return []
-        return sorted([
+        dirs = [
             d for d in os.listdir(self.plugins_dir)
             if os.path.isdir(os.path.join(self.plugins_dir, d))
-        ])
+        ]
+        if self.include_dirs is not None:
+            dirs = [d for d in dirs if d in self.include_dirs]
+        return sorted(dirs)
 
     async def load_all(self) -> List[str]:
-        """启动 Node 宿主并加载 plugins_dir 下的插件，返回已加载插件名列表"""
+        """启动 Node 宿主并加载 plugins_dir 下的插件，返回已加载插件名列表（记录加载过程）"""
         if not self._node_available():
             logger.error("Node.js 不可用，Yunzai 兼容层无法启用")
             return []
@@ -305,9 +310,14 @@ class YunzaiCompatAdapter:
 
         await self._start_host()
         # 加载所有插件目录（宿主一次加载全部，模拟真实云崽）
+        self.load_progress = [{"name": n, "ok": False, "error": "加载中", "commands": 0, "kind": "yunzai"}
+                              for n in names]
         resp = await self._rpc({"type": "load", "dir": self.plugins_dir}, timeout=30)
         if resp and resp.get("ok"):
             self._loaded_plugins = resp.get("instances", 0)
+            for item in self.load_progress:
+                item["ok"] = True
+                item["error"] = ""
             logger.info(f"Yunzai compat loaded {self._loaded_plugins} plugin instances from {len(names)} dirs: {names}")
         else:
             logger.error(f"Yunzai 插件加载失败: {resp}")

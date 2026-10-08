@@ -5,3 +5,12 @@ __pycache__/
 build/
 dist/
 .mimosa/
+
+# ===== 运行数据 / 日志（不进版本库）=====
+data/
+data/*
+*.log
+logs/
+.env
+*.env
+!*.env.example

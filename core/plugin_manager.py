@@ -229,6 +229,23 @@ class PluginManager:
             manifest_path = os.path.join(plugin_path, "manifest.json")
             init_path = os.path.join(plugin_path, "__init__.py")
 
+            kind = "native"
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    kind = data.get("kind", kind)
+                except Exception as e:
+                    logger.warning(f"Failed to load manifest for {name}: {e}")
+            # 兼容层插件识别（无 manifest 时按格式推断）
+            if kind == "native":
+                if os.path.exists(os.path.join(plugin_path, "metadata.yaml")):
+                    kind = "astrbot"  # AstrBot 官方插件标志（metadata.yaml + main.py）
+                elif os.path.exists(os.path.join(plugin_path, "index.js")) or os.path.exists(os.path.join(plugin_path, "index.mjs")):
+                    kind = "yunzai"
+                elif os.path.exists(os.path.join(plugin_path, "main.py")):
+                    kind = "astrbot"
+
             if os.path.exists(manifest_path):
                 try:
                     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -242,13 +259,17 @@ class PluginManager:
                         enabled=data.get("enabled", True),
                         config=data.get("config", {}),
                         plugin_dir=plugin_path,
-                        kind=data.get("kind", "native"),
+                        kind=data.get("kind", kind),
                     )
                     discovered.append(info)
                 except Exception as e:
                     logger.warning(f"Failed to load manifest for {name}: {e}")
             elif os.path.exists(init_path):
-                discovered.append(PluginInfo(name=name, plugin_dir=plugin_path))
+                discovered.append(PluginInfo(name=name, plugin_dir=plugin_path, kind=kind))
+            else:
+                # 兼容层插件（astrbot/yunzai）：无 __init__.py 也列入发现
+                if kind != "native":
+                    discovered.append(PluginInfo(name=name, plugin_dir=plugin_path, kind=kind))
 
         return discovered
 
@@ -270,6 +291,8 @@ class PluginManager:
         # 跳过已卸载/已 SWAP 的插件
         discovered = [d for d in discovered
                       if d.name not in disabled_set and d.name not in swapped_set]
+        # 跳过兼容层插件（astrbot/yunzai 由对应兼容层加载，原生加载器不处理）
+        discovered = [d for d in discovered if d.kind == "native"]
 
         order = self._topological_sort(discovered)
         loaded = []

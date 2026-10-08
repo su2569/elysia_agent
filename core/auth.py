@@ -20,6 +20,7 @@ logger = get_logger("AuthManager")
 
 class UserRole(IntEnum):
     """用户角色（数值越大权限越高）"""
+    GUEST = 0   # 游客档（阶段三：命令执行分级最低档）
     USER = 1
     ADMIN = 2
     OWNER = 3
