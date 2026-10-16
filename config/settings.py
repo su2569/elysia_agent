@@ -85,6 +85,15 @@ class ToolChainConfig:
 
 
 @dataclass
+class CronConfig:
+    """定时任务配置（v2.6.0，阶段二收官）"""
+    enabled: bool = True               # 是否启用定时任务调度器
+    state_file: str = "./data/cron_state.json"   # 持久化文件
+    poll_interval: float = 30.0        # 调度循环扫描间隔（秒）
+    misfire_grace_sec: float = 300.0   # 错过触发点的补跑宽限（超出则跳过）
+
+
+@dataclass
 class ServerConfig:
     """服务端配置"""
     host: str = "0.0.0.0"
@@ -340,6 +349,7 @@ class Settings:
     platform: List[PlatformConfig] = field(default_factory=list)  # 通用平台实例列表
     mcp: MCPConfig = field(default_factory=MCPConfig)             # MCP 客户端（阶段二）
     tool_chain: ToolChainConfig = field(default_factory=ToolChainConfig)  # 工具链（阶段二 v2.6.0）
+    cron: CronConfig = field(default_factory=CronConfig)          # 定时任务（阶段二 v2.6.0 收官）
 
     def __post_init__(self):
         # 所有构造路径（默认构造 / from_dict / from_file）都应用环境变量覆盖
@@ -452,6 +462,10 @@ class Settings:
             settings.prompt = _dict_to_dataclass(settings.prompt, data["prompt"])
         if "onebot" in data:
             settings.onebot = _dict_to_dataclass(settings.onebot, data["onebot"])
+        if "tool_chain" in data:
+            settings.tool_chain = _dict_to_dataclass(settings.tool_chain, data["tool_chain"])
+        if "cron" in data:
+            settings.cron = _dict_to_dataclass(settings.cron, data["cron"])
         if "mcp" in data:
             mcp_raw = data["mcp"]
             if isinstance(mcp_raw, dict):

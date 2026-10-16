@@ -195,6 +195,38 @@ class ElysiaRunner:
             except Exception as e:
                 logger.warning(f"工具链执行器初始化失败（已降级）: {e}")
 
+        # v2.6.0：定时任务调度器（阶段二收官）——触发统一经 self.run 安全链，
+        # payload 只需 query（user_id 缺省补 cron_system，走完整速率限制/消毒/超时）
+        self.cron = None
+        if self.settings.cron.enabled:
+            try:
+                import weakref as _weakref
+                from ..cron import CronScheduler
+                from ..cron.tools import CronManageTool
+
+                async def _cron_run(**payload):
+                    payload.setdefault("user_id", "cron_system")
+                    return await self.run(**payload)
+
+                self.cron = CronScheduler(
+                    runner_run=_cron_run,
+                    state_path=self.settings.cron.state_file,
+                    poll_interval=self.settings.cron.poll_interval,
+                    misfire_grace_sec=self.settings.cron.misfire_grace_sec,
+                )
+                ToolRegistry.register(CronManageTool(_weakref.ref(self.cron)))
+                from ..cron import set_scheduler
+                set_scheduler(self.cron)   # 全局访问器（插件/诊断层可用）
+                logger.info(
+                    "定时任务调度器已就绪（poll=%ss, grace=%ss, state=%s）" % (
+                        self.settings.cron.poll_interval,
+                        self.settings.cron.misfire_grace_sec,
+                        self.settings.cron.state_file,
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"定时任务调度器初始化失败（已降级）: {e}")
+
         logger.info("ElysiaRunner v%s initialized (embeddable mode, concurrency=%s)" % (self.VERSION, self._use_concurrency))
 
     # ===== 内置命令（v2.5.0，模仿 AstrBot 命令体系） =====
@@ -246,6 +278,12 @@ class ElysiaRunner:
             logger.info(f"内置子代理注册完成: {len(agents)} 个")
         except Exception as e:
             logger.warning(f"内置子代理注册失败（已降级）: {e}")
+        # Cron：启动调度循环 + 恢复持久化任务（失败降级，不阻断启动）
+        if self.cron is not None:
+            try:
+                await self.cron.start()
+            except Exception as e:
+                logger.warning(f"定时任务调度器启动失败（已降级）: {e}")
         logger.info("ElysiaRunner started")
 
     async def stop(self) -> None:
@@ -264,6 +302,12 @@ class ElysiaRunner:
             unregister_builtin_subagents()
         except Exception as e:
             logger.warning(f"内置子代理注销异常（已忽略）: {e}")
+        # Cron：停止调度循环并持久化状态
+        if self.cron is not None:
+            try:
+                await self.cron.stop()
+            except Exception as e:
+                logger.warning(f"定时任务调度器停止异常（已忽略）: {e}")
         logger.info("ElysiaRunner stopped")
 
     async def __aenter__(self):
