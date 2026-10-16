@@ -407,11 +407,18 @@ class PluginManager:
                 state = PluginState.SWAPPED
             else:
                 state = self.plugin_state(name)
+            # enabled 反映「生效状态」：manifest 启用 且 未在持久化 disabled/swapped 中
+            # （与兼容层 get_state_summary 的 enabled 语义对齐，供 WebUI 正确展示开关）
+            effective_enabled = (
+                bool(info and info.enabled)
+                and name not in self._persisted["disabled"]
+                and name not in self._persisted["swapped"]
+            )
             summary.append({
                 "name": name,
                 "state": state.value,
                 "loaded": name in self._plugins,
-                "enabled": bool(info and info.enabled),
+                "enabled": effective_enabled,
                 "version": info.version if info else "",
                 "description": info.description if info else "",
                 "kind": info.kind if info else "native",
@@ -434,12 +441,18 @@ class PluginManager:
         return name not in self._persisted["disabled"] and name not in self._persisted["swapped"]
 
     async def disable(self, name: str) -> bool:
-        """禁用插件：内存中停用（不持久化，下次启动仍会加载）"""
+        """禁用插件：内存停用 + 持久化到 disabled（下次启动不加载，与 unload 语义对齐）"""
         plugin = self._plugins.get(name)
         if not plugin:
             return False
         plugin.info.enabled = False
         await plugin.on_disable()
+        if name not in self._persisted["disabled"]:
+            self._persisted["disabled"].append(name)
+        if name in self._persisted["swapped"]:
+            self._persisted["swapped"].remove(name)
+        self._save_persisted_state()
+        logger.info(f"Plugin {name} disabled (will not load on next start)")
         return True
 
     # ==================== 双态关闭 ====================
