@@ -18,6 +18,7 @@ from .audit import log_event, EventSeverity
 from .process_tree import process_tree_snapshot
 from .parent_validate import validate_main_parent
 from .integrity import integrity_status
+from .override import override_status  # 阶段四：心跳上报 + 豁免超时自动恢复
 
 
 class CallDefenseDaemon:
@@ -61,6 +62,7 @@ class CallDefenseDaemon:
             "process_tree": process_tree_snapshot(self.main_pid),
             "parent": validate_main_parent(self.main_pid),
             "integrity": integrity_status(),
+            "override": override_status(),  # 阶段四：豁免状态 + 心跳
         }
         self.last_scan = result
 

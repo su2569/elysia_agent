@@ -15,6 +15,17 @@ from .process_tree import process_tree_snapshot, is_trusted_ppid
 from .parent_validate import validate_main_parent
 from .integrity import integrity_status
 from .audit import SecurityLog, EventSeverity, log_event, get_events
+from .override import (
+    OverrideError,
+    override_off,
+    override_on,
+    heartbeat,
+    override_status,
+    is_heartbeat_alive,
+    set_role_resolver,
+    DEFAULT_OVERRIDE_TTL,
+    MAX_OVERRIDE_TTL,
+)
 
 __all__ = [
     "CallDefenseDaemon",
@@ -27,6 +38,16 @@ __all__ = [
     "EventSeverity",
     "log_event",
     "get_events",
+    # 阶段四：豁免状态机 + 防御心跳
+    "OverrideError",
+    "override_off",
+    "override_on",
+    "heartbeat",
+    "override_status",
+    "is_heartbeat_alive",
+    "set_role_resolver",
+    "DEFAULT_OVERRIDE_TTL",
+    "MAX_OVERRIDE_TTL",
 ]
 
 __version__ = "2.4.0"
