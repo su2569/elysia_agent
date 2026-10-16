@@ -196,6 +196,7 @@ class _Filter:
                 "fn": fn,
                 "star": None,
                 "meta": meta,
+                "plugin": _CURRENT_LOADING_PLUGIN,
             })
             return fn
         return deco
@@ -219,7 +220,8 @@ class _Filter:
 
     def on_event(self, event_type, **opts):
         def deco(fn):
-            _HANDLERS.append({"type": "event", "event_type": event_type, "fn": fn, "star": None})
+            _HANDLERS.append({"type": "event", "event_type": event_type, "fn": fn, "star": None,
+                              "plugin": _CURRENT_LOADING_PLUGIN})
             return fn
         return deco
 
@@ -505,6 +507,9 @@ class AstrBotCompatAdapter:
         self.include_dirs = include_dirs  # 仅加载这些目录（PluginManager 按 kind 过滤）
         self._commands: Dict[str, Dict[str, Any]] = {}  # 命令名 -> 定义（旧格式）
         self._loaded_plugins: List[str] = []
+        # 单插件级操作支持：exec 快照归属（装饰器 handler 的 plugin 字段可能为 Star 元数据名，不可靠）
+        self._plugin_handlers: Dict[str, List[Dict[str, Any]]] = {}  # 插件目录名 -> 本插件新增的装饰器处理器
+        self._plugin_stars: Dict[str, List[str]] = {}                 # 插件目录名 -> Star 类名列表
         self.load_progress: List[Dict[str, Any]] = []   # 加载过程（每插件状态/命令数）
         AstrBotShim.install()
 
@@ -531,11 +536,12 @@ class AstrBotCompatAdapter:
                 loaded.append(name)
                 cmds = sum(1 for c in self.list_commands() if c["plugin"] == name)
                 self.load_progress.append({"name": name, "ok": True, "error": "",
-                                           "commands": cmds, "kind": "astrbot"})
+                                           "commands": cmds, "kind": "astrbot", "enabled": True})
                 logger.info(f"AstrBot 兼容插件已加载: {name}（{cmds} 个命令）")
             except Exception as e:
                 self.load_progress.append({"name": name, "ok": False,
-                                           "error": str(e)[:120], "commands": 0, "kind": "astrbot"})
+                                           "error": str(e)[:120], "commands": 0, "kind": "astrbot",
+                                           "enabled": False})
                 logger.error(f"Failed to load AstrBot plugin {name}: {e}", exc_info=True)
         self._loaded_plugins = loaded
         logger.info(f"AstrBot compat loaded {len(loaded)} plugins: {loaded}")
@@ -569,7 +575,13 @@ class AstrBotCompatAdapter:
             # 设置当前加载插件上下文，供 register/装饰器归属到本插件
             _CURRENT_LOADING_PLUGIN = name
             _CURRENT_LOADING_MODULE_PATH = module_name
+            # 快照：exec 前的处理器/Star 集合（用于单插件卸载时精准归属）
+            _pre_handler_ids = {id(h) for h in _HANDLERS}
+            _pre_star_keys = set(_STAR_INSTANCES.keys())
             spec.loader.exec_module(module)
+            self._plugin_handlers[name] = [h for h in _HANDLERS if id(h) not in _pre_handler_ids]
+            self._plugin_stars[name] = [k for k in _STAR_INSTANCES.keys()
+                                       if k not in _pre_star_keys]
 
             # 旧格式：register() 返回命令列表（非 list 时跳过）
             if hasattr(module, "register"):
@@ -588,6 +600,8 @@ class AstrBotCompatAdapter:
         finally:
             if plugin_dir in sys.path:
                 sys.path.remove(plugin_dir)
+            _CURRENT_LOADING_PLUGIN = ""
+            _CURRENT_LOADING_MODULE_PATH = ""
         logger.debug(f"AstrBot plugin {name} loaded")
 
     def list_commands(self) -> List[Dict[str, Any]]:
@@ -613,6 +627,8 @@ class AstrBotCompatAdapter:
         # 1. 装饰器格式处理器（优先级高）
         for h in _HANDLERS:
             if h.get("type") != "command":
+                continue
+            if not self._handler_active(h):
                 continue
             cmds = list(h.get("cmds", [])) + list(h.get("alias", []))
             if not any(content.strip() == c or content.strip().startswith(c + " ")
@@ -642,6 +658,8 @@ class AstrBotCompatAdapter:
 
         # 2. 旧格式命令
         for kw, cmd in self._commands.items():
+            if not self._is_active(cmd.get("plugin", "")):
+                continue
             if content.strip() == kw or content.strip().startswith(kw + " "):
                 try:
                     if cmd["is_async"]:
@@ -657,8 +675,106 @@ class AstrBotCompatAdapter:
 
         return {"handled": False, "replies": []}
 
+    # ==================== 单插件级操作（WebUI 对齐原生层） ====================
+
+    def _is_active(self, plugin_name: str) -> bool:
+        """插件是否处于启用状态（按 load_progress 判定）"""
+        for p in self.load_progress:
+            if p["name"] == plugin_name:
+                return bool(p.get("ok") and p.get("enabled", True))
+        return True
+
+    def _handler_active(self, h: Dict[str, Any]) -> bool:
+        """装饰器处理器归属的插件是否启用（快照归属优先）"""
+        for pname, hs in self._plugin_handlers.items():
+            for x in hs:
+                if x is h:
+                    return self._is_active(pname)
+        # 未归属的处理器（非插件加载期间注册）默认放行
+        return True
+
+    def load(self, name: str) -> bool:
+        """加载单个 AstrBot 兼容插件（已加载则直接成功）"""
+        if name not in self.discover():
+            return False
+        if name in self._loaded_plugins:
+            return True
+        try:
+            self._load_plugin(name)
+        except Exception as e:
+            logger.error(f"Failed to load AstrBot plugin {name}: {e}")
+            return False
+        if name not in self._loaded_plugins:
+            self._loaded_plugins.append(name)
+        cmds = sum(1 for c in self.list_commands() if c["plugin"] == name)
+        for p in self.load_progress:
+            if p["name"] == name:
+                p.update({"ok": True, "error": "", "commands": cmds, "enabled": True})
+                break
+        else:
+            self.load_progress.append({"name": name, "ok": True, "error": "",
+                                       "commands": cmds, "kind": "astrbot", "enabled": True})
+        logger.info(f"AstrBot 兼容插件已加载: {name}（{cmds} 个命令）")
+        return True
+
+    def unload(self, name: str) -> bool:
+        """内存卸载单个 AstrBot 兼容插件（清除其命令/处理器/Star 实例/模块缓存）"""
+        if not any(p["name"] == name for p in self.load_progress):
+            return False
+        # 1. 旧格式命令（plugin 字段即目录名，可靠）
+        self._commands = {kw: c for kw, c in self._commands.items()
+                          if c.get("plugin") != name}
+        # 2. 装饰器处理器（快照精准移除）
+        hs = self._plugin_handlers.pop(name, [])
+        if hs:
+            hs_ids = {id(h) for h in hs}
+            _HANDLERS[:] = [h for h in _HANDLERS if id(h) not in hs_ids]
+        # 3. Star 实例
+        for k in self._plugin_stars.pop(name, []):
+            _STAR_INSTANCES.pop(k, None)
+        # 4. sys.modules 模块缓存
+        pkg_name = f"astrbot_compat_{name}"
+        for mod in [m for m in list(sys.modules) if m == pkg_name or m.startswith(pkg_name + ".")]:
+            sys.modules.pop(mod, None)
+        # 5. 状态更新
+        if name in self._loaded_plugins:
+            self._loaded_plugins.remove(name)
+        for p in self.load_progress:
+            if p["name"] == name:
+                p.update({"ok": False, "error": "unloaded", "commands": 0, "enabled": False})
+        logger.info(f"AstrBot 兼容插件已卸载: {name}")
+        return True
+
+    def enable(self, name: str) -> bool:
+        if not any(p["name"] == name and p["ok"] for p in self.load_progress):
+            return False
+        for p in self.load_progress:
+            if p["name"] == name:
+                p["enabled"] = True
+        return True
+
+    def disable(self, name: str) -> bool:
+        if not any(p["name"] == name and p["ok"] for p in self.load_progress):
+            return False
+        for p in self.load_progress:
+            if p["name"] == name:
+                p["enabled"] = False
+        return True
+
+    def get_state_summary(self) -> List[Dict[str, Any]]:
+        """兼容层状态摘要（与原生 PluginManager.get_state_summary 结构对齐）"""
+        return [
+            {"name": p["name"], "state": "loaded" if p["ok"] else "unloaded",
+             "loaded": bool(p["ok"]), "enabled": bool(p.get("enabled", p["ok"])),
+             "version": "", "description": f"AstrBot 兼容插件（{p.get('commands', 0)} 命令）",
+             "kind": "astrbot"}
+            for p in self.load_progress
+        ]
+
     def unload_all(self) -> None:
         self._commands.clear()
         _HANDLERS.clear()
         _STAR_INSTANCES.clear()
         self._loaded_plugins = []
+        self._plugin_handlers.clear()
+        self._plugin_stars.clear()
