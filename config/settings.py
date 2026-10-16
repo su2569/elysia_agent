@@ -234,6 +234,71 @@ class OneBotConfig:
 
 
 @dataclass
+class PlatformConfig:
+    """通用平台实例配置（对齐 AstrBot cmd_config.json 的 platform 数组）
+
+    同一 type 可配多个（靠 id 区分），enable=False 则该实例跳过加载。
+    不写的 type 自然不会加载。各平台专属参数随 type 而变。
+    """
+    id: str = ""
+    type: str = ""                 # onebot_ws | onebot_ws_server | http | telegram | discord | qq_official
+    enable: bool = True
+    # ---- onebot_ws / onebot_ws_server ----
+    mode: str = "reverse"          # reverse=客户端连 QQ 服务 / forward=服务端等连接 / both=两者
+    host: str = "127.0.0.1"        # 反向：QQ WS 服务地址
+    port: int = 1005               # 反向：QQ WS 服务端口
+    forward_host: str = "0.0.0.0"  # 正向：监听地址
+    forward_port: int = 1006       # 正向：监听端口
+    token: str = ""
+    allowed_groups: List[str] = field(default_factory=lambda: ["1049279188"])
+    # ---- qq_official（官方开放平台，占位给布洛妮娅/昔涟机器人）----
+    appid: str = ""
+    secret: str = ""
+    base_url: str = "https://api.sgroup.qq.com"
+    intents: List[str] = field(default_factory=list)
+    sandbox: bool = True
+    enable_group_c2c: bool = True
+    enable_guild_direct_message: bool = True
+    # ---- http / telegram / discord ----
+    auth_token: str = ""
+
+
+@dataclass
+class MCPServerConfig:
+    """MCP 服务器连接配置（阶段二：core/mcp_client.py 消费）
+
+    transport: stdio | http | sse
+    - stdio: command/args/env/cwd（子进程 + 换行分隔 JSON-RPC）
+    - http:  streamable-http 单端点（MCP 2025-03-26+），自动维护 Mcp-Session-Id
+    - sse:   遗留 SSE 传输（MCP 2024-11-05），GET 长连接 + POST 回发
+    """
+    name: str = ""                    # 工具前缀：注册为 {name}__{tool}
+    transport: str = "stdio"
+    enabled: bool = True
+    # ---- stdio ----
+    command: str = ""
+    args: List[str] = field(default_factory=list)
+    env: Dict[str, str] = field(default_factory=dict)
+    cwd: str = ""
+    # ---- http / sse ----
+    url: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+    # ---- 其他 ----
+    timeout: int = 60                 # 该服务器单次请求超时（秒）
+
+
+@dataclass
+class MCPConfig:
+    """MCP 客户端全局配置（阶段二）"""
+    enabled: bool = False             # 默认关闭：无服务器配置时零开销
+    strict_command_validation: bool = True   # stdio 命令注入防御校验
+    max_tools_per_server: int = 200   # 防恶意服务器淹没注册表
+    connect_timeout: int = 30
+    request_timeout: int = 60
+    servers: List[MCPServerConfig] = field(default_factory=list)
+
+
+@dataclass
 class Settings:
     """
     Elysia Agent 全局配置
@@ -262,6 +327,8 @@ class Settings:
     compat: CompatConfig = field(default_factory=CompatConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     onebot: OneBotConfig = field(default_factory=OneBotConfig)
+    platform: List[PlatformConfig] = field(default_factory=list)  # 通用平台实例列表
+    mcp: MCPConfig = field(default_factory=MCPConfig)             # MCP 客户端（阶段二）
 
     def __post_init__(self):
         # 所有构造路径（默认构造 / from_dict / from_file）都应用环境变量覆盖
@@ -374,6 +441,31 @@ class Settings:
             settings.prompt = _dict_to_dataclass(settings.prompt, data["prompt"])
         if "onebot" in data:
             settings.onebot = _dict_to_dataclass(settings.onebot, data["onebot"])
+        if "mcp" in data:
+            mcp_raw = data["mcp"]
+            if isinstance(mcp_raw, dict):
+                mcp_raw = dict(mcp_raw)  # copy，避免修改调用方字典
+                servers_raw = mcp_raw.pop("servers", None) or []
+                settings.mcp = _dict_to_dataclass(settings.mcp, mcp_raw)
+                for item in servers_raw:
+                    if isinstance(item, dict):
+                        settings.mcp.servers.append(
+                            _dict_to_dataclass(MCPServerConfig(), item)
+                        )
+        if "platform" in data:
+            # 通用平台实例列表（列表项按 id 归并去重）
+            raw_list = data.get("platform") or []
+            existing = {p.id: p for p in settings.platform if p.id}
+            merged = []
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    continue
+                pid = item.get("id", "")
+                if pid and pid in existing:
+                    merged.append(_dict_to_dataclass(existing[pid], item))
+                else:
+                    merged.append(_dict_to_dataclass(PlatformConfig(), item))
+            settings.platform = merged
 
         # 环境变量覆盖
         settings._apply_env_overrides()

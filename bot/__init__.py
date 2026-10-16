@@ -5,6 +5,7 @@ from .platform_adapter import BasePlatformAdapter, PlatformType
 from .telegram import TelegramBotAdapter
 from .discord import DiscordBotAdapter
 from .http import HTTPWebhookAdapter
+from .qqofficial import QQOfficialBotAdapter
 
 __all__ = [
     "BotMessage",
@@ -14,4 +15,5 @@ __all__ = [
     "TelegramBotAdapter",
     "DiscordBotAdapter",
     "HTTPWebhookAdapter",
+    "QQOfficialBotAdapter",
 ]
