@@ -83,6 +83,15 @@ class ElysiaRunner:
         self._total_errors = AtomicCounter(0)
         self._blocked_count = AtomicCounter(0)
 
+        # MCP 多服务器管理器（阶段二：连接外部 MCP Server，注册远端工具）
+        self.mcp: Optional["MCPManager"] = None
+        if self.settings.mcp.enabled:
+            try:
+                from ..core.mcp_client import MCPManager
+                self.mcp = MCPManager.from_config(self.settings.mcp)
+            except Exception as e:
+                logger.warning(f"MCP 管理器初始化失败（已降级）: {e}")
+
         # 并发控制组件
         self._use_concurrency = getattr(self.settings, 'concurrency', None) is not None
         if self._use_concurrency:
@@ -201,12 +210,39 @@ class ElysiaRunner:
         """启动 Runner，初始化异步组件"""
         if self._memory_queue:
             await self._memory_queue.start()
+        # MCP：连接全部已配置服务器并注册远端工具（失败降级，不抛异常）
+        if self.mcp is not None:
+            try:
+                status = await self.mcp.load_all()
+                logger.info(f"MCP 加载完成: {status.get('total_tools', 0)} 个远端工具")
+            except Exception as e:
+                logger.warning(f"MCP 加载失败（已降级）: {e}")
+        # SubAgent：注册内置垂直子代理（失败降级，不阻断启动）
+        try:
+            import weakref
+            from ..subagent import register_builtin_subagents
+            agents = register_builtin_subagents(self.llm, runner_weakref=weakref.ref(self))
+            logger.info(f"内置子代理注册完成: {len(agents)} 个")
+        except Exception as e:
+            logger.warning(f"内置子代理注册失败（已降级）: {e}")
         logger.info("ElysiaRunner started")
 
     async def stop(self) -> None:
         """停止 Runner，清理资源"""
         if self._memory_queue:
             await self._memory_queue.stop()
+        # MCP：反注册工具并优雅关闭连接
+        if self.mcp is not None:
+            try:
+                await self.mcp.shutdown()
+            except Exception as e:
+                logger.warning(f"MCP 关闭异常（已忽略）: {e}")
+        # SubAgent：注销内置子代理
+        try:
+            from ..subagent import unregister_builtin_subagents
+            unregister_builtin_subagents()
+        except Exception as e:
+            logger.warning(f"内置子代理注销异常（已忽略）: {e}")
         logger.info("ElysiaRunner stopped")
 
     async def __aenter__(self):
