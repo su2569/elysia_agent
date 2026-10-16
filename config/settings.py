@@ -75,6 +75,16 @@ class SubAgentConfig:
 
 
 @dataclass
+class ToolChainConfig:
+    """工具链配置（v2.6.0）"""
+    enabled: bool = True              # 是否启用 run_tool_chain 动作
+    max_steps: int = 8                # 单链默认步数上限（硬上限 32 在 plan.py 内钳制）
+    max_concurrent: int = 5           # 组内并行上限
+    overall_timeout: float = 180.0    # 整链超时兜底
+    result_cap: int = 20000           # 观测文本体积上限（防上下文挤爆）
+
+
+@dataclass
 class ServerConfig:
     """服务端配置"""
     host: str = "0.0.0.0"
@@ -329,6 +339,7 @@ class Settings:
     onebot: OneBotConfig = field(default_factory=OneBotConfig)
     platform: List[PlatformConfig] = field(default_factory=list)  # 通用平台实例列表
     mcp: MCPConfig = field(default_factory=MCPConfig)             # MCP 客户端（阶段二）
+    tool_chain: ToolChainConfig = field(default_factory=ToolChainConfig)  # 工具链（阶段二 v2.6.0）
 
     def __post_init__(self):
         # 所有构造路径（默认构造 / from_dict / from_file）都应用环境变量覆盖

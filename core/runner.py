@@ -26,6 +26,7 @@ from ..interfaces.memory import IMemoryService
 from ..registry.tool_registry import ToolRegistry
 from ..registry.subagent_registry import SubAgentRegistry
 from ..registry.hook_registry import HookRegistry
+from ..tool_chain.plan import ChainPlanError, parse_plan
 from ..config.settings import Settings
 from ..config.prompts import PromptManager
 from ..config.prompt_guard import PromptGuard
@@ -173,6 +174,26 @@ class ElysiaRunner:
 
         # v2.5.0：内置命令处理器（可选，install_commands() 后启用 /help 等命令）
         self._command_handler = None
+
+        # v2.6.0：工具链执行器（每步经 _execute_action，完整继承安全链）
+        self._chain_executor = None
+        if self.settings.tool_chain.enabled:
+            try:
+                from ..tool_chain import ChainExecutor
+                self._chain_executor = ChainExecutor(
+                    execute_action=self._execute_action,
+                    max_concurrent=self.settings.tool_chain.max_concurrent,
+                    result_cap=self.settings.tool_chain.result_cap,
+                )
+                logger.info(
+                    "工具链执行器已就绪（max_steps=%s, max_concurrent=%s, overall_timeout=%ss）" % (
+                        self.settings.tool_chain.max_steps,
+                        self.settings.tool_chain.max_concurrent,
+                        self.settings.tool_chain.overall_timeout,
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"工具链执行器初始化失败（已降级）: {e}")
 
         logger.info("ElysiaRunner v%s initialized (embeddable mode, concurrency=%s)" % (self.VERSION, self._use_concurrency))
 
@@ -737,6 +758,9 @@ class ElysiaRunner:
             schemas.append({"type": "function", "function": {"name": tool.name, "description": tool.description, "parameters": tool.parameters}})
         if self.settings.subagent.enabled:
             schemas.append({"type": "function", "function": {"name": "delegate_to_subagent", "description": "将复杂任务委托给专门的子代理处理", "parameters": {"type": "object", "properties": {"agent_name": {"type": "string"}, "task": {"type": "string"}, "context": {"type": "string"}}, "required": ["agent_name", "task"]}}})
+        # v2.6.0：工具链——LLM 一次声明多步计划（DAG 依赖 + 变量传递 + 组内并行）
+        if self.settings.tool_chain.enabled:
+            schemas.append({"type": "function", "function": {"name": "run_tool_chain", "description": "执行多步工具链计划：一次声明多个工具步骤及其依赖关系，系统按拓扑顺序执行（无依赖的步骤并行），前序步骤的输出可通过 $id 或 $id.result 引用。适用于需要连续调用多个工具的复杂任务，比逐个调用更高效", "parameters": {"type": "object", "properties": {"description": {"type": "string", "description": "计划说明（可选）"}, "steps": {"type": "array", "description": "步骤列表", "items": {"type": "object", "properties": {"id": {"type": "string", "description": "步骤唯一标识，1-32字符"}, "tool": {"type": "string", "description": "工具名"}, "args": {"type": "object", "description": "工具参数，可含 $id / $id.result 引用前序输出"}, "depends_on": {"type": "array", "items": {"type": "string"}, "description": "依赖的前序步骤 id 列表"}, "on_fail": {"type": "string", "enum": ["abort", "continue"], "description": "失败语义：abort=跳过全部下游，continue=错误文本继续传递（默认）"}, "timeout": {"type": "number", "description": "单步超时秒数（可选，默认30）"}}, "required": ["id", "tool"]}}}, "required": ["steps"]}}})
         return schemas
 
     async def _execute_action(self, action: str, inputs: dict, ctx: AgentContext) -> str:
@@ -756,6 +780,28 @@ class ElysiaRunner:
                 return f"【错误】子代理 {agent_name} 执行超时"
             except Exception as e:
                 return f"【错误】子代理 {agent_name} 执行失败: {str(e)}"
+
+        # v2.6.0：工具链——一次声明多步计划，拓扑分组执行（安全链完整继承）
+        if action == "run_tool_chain":
+            if not self.settings.tool_chain.enabled:
+                return "【错误】工具链功能已禁用"
+            if self._chain_executor is None:
+                return "【错误】工具链执行器未初始化"
+            try:
+                plan = parse_plan(inputs, max_steps=self.settings.tool_chain.max_steps)
+            except ChainPlanError as e:
+                return f"【计划无效】{e}。请修正计划格式后重试（依赖只能引用已声明的步骤 id，且不允许成环/嵌套）"
+            try:
+                report = await self._chain_executor.run(
+                    plan,
+                    ctx,
+                    default_timeout=self.settings.tool.timeout_per_tool,
+                    overall_timeout=self.settings.tool_chain.overall_timeout,
+                )
+                return report.render()
+            except Exception as e:
+                logger.error(f"工具链执行异常: {e}", exc_info=True)
+                return f"【错误】工具链执行失败: {str(e)}"
 
         tool = ToolRegistry.get(action)
         if not tool:
