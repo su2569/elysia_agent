@@ -27,7 +27,12 @@ from ..utils.logger import get_logger
 logger = get_logger("Recovery")
 
 REPORT_FILE = "crash_report.json"
-MAX_AUTO_RELOAD = 1  # 最多自动重载次数
+# 最多自动重载次数。必须 >= 2，否则 handle_crash 的三级升级
+# （reload -> full_reload -> give_up）无法成立：
+# count=0 reload，count=1 full_reload，count>=2 give_up。
+# 曾为 1，导致 count>=max_reload 先命中，full_reload 分支永远不可达，
+# 第二次崩溃直接持久化禁用模块。
+MAX_AUTO_RELOAD = 2
 
 
 @dataclass
@@ -55,6 +60,7 @@ class ModuleRecovery:
         self._reload_counts: Dict[str, int] = {}
         self._crashes: List[Dict[str, Any]] = []
         self._disabled: set = set()  # 重载超限后禁用的模块
+        self._load_history()
 
     # ==================== 报告持久化 ====================
 
@@ -62,6 +68,28 @@ class ModuleRecovery:
     def report_file(self) -> str:
         from ..utils.paths import safe_join
         return safe_join(self.data_dir, REPORT_FILE)
+
+    def _load_history(self) -> None:
+        """启动时读回崩溃报告
+
+        崩溃报告落盘的唯一意义就是重启后还能看到。只写不读等于没有持久化，
+        进程一重启历史就归零。
+        """
+        try:
+            from pathlib import Path
+            path = Path(self.report_file)
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            crashes = data.get("crashes", [])
+            if isinstance(crashes, list):
+                self._crashes = [c for c in crashes if isinstance(c, dict)]
+            for c in self._crashes:
+                mod = c.get("module", "")
+                if mod and c.get("action") == "give_up":
+                    self._disabled.add(mod)
+        except Exception as e:
+            logger.warning(f"读取崩溃报告失败（忽略）: {e}")
 
     def _save(self) -> None:
         try:
@@ -221,4 +249,14 @@ class ModuleRecovery:
         }
 
     def is_module_ok(self, module: str) -> bool:
-        return module not in self._disabled
+        """模块是否可用：本进程内被禁用，或已被持久化禁用，都视为不可用"""
+        if module in self._disabled:
+            return False
+        if self.pm is not None:
+            name = module.split(":", 1)[-1]
+            try:
+                if name in self.pm._persisted.get("disabled", []):
+                    return False
+            except Exception:
+                pass
+        return True
