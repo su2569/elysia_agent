@@ -134,7 +134,13 @@ def _read_all(since: float = 0.0, limit_lines: int = 0) -> List[Dict[str, Any]]:
 
 def summary(days: int = 7) -> Dict[str, Any]:
     """按模型 / 来源 / 日期聚合，返回给前端直接用的结构。"""
-    days = max(1, min(int(days or 7), 365))
+    # 注意：不能用 `days or 7`，那会让 days=0 意外变成 7。
+    # 非整数/None 回退到默认 7 天，数值本身夹到 [1, 365]。
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        d = 7
+    days = max(1, min(d, 365))
     since = time.time() - days * 86400
     rows = _read_all(since=since)
 
