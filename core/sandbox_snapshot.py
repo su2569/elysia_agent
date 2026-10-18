@@ -163,9 +163,12 @@ class SandboxSnapshot:
         return result
 
     def rollback(self, n: int = 1) -> Dict[str, Any]:
-        """回滚被监控文件到第 n 轮之前的快照内容。
-        n=1 → 恢复到最近一轮快照之前的状态（即上一轮快照记录的内容）;
+        """回滚被监控文件到「从最新往旧数第 n 轮」快照记录的内容。
+        n=1 → 恢复到最近一轮快照（即写操作前的打点）;
         n=2 → 恢复到上上轮快照记录的内容; 以此类推。
+
+        快照由 SnapshotBeforeActHook 在 before_act 打点，队列末尾即「写前状态」，
+        因此 n=1 必须取末尾那轮；越界时回退到队列最旧快照（基线兜底）。
         对每个有内容备份的监控文件按队列位置恢复，并记录 restore_log。
         """
         summary = {"restored": [], "skipped": [], "failed": []}
@@ -177,10 +180,10 @@ class SandboxSnapshot:
                 q = self.snapshots.get(fp)
                 if not q:
                     continue
-                # 回滚到「从最新往旧数第 n 轮」之前记录的内容。
-                # n=1 → 恢复到最近一轮快照之前的状态（即上一轮快照记录的内容）。
-                # 目标索引: idx = len(q)-1-n。若该轮不存在（越界），回退到队列最旧可用快照（基线兜底）。
-                idx = max(0, len(q) - 1 - n)
+                # 回滚到「从最新往旧数第 n 轮」快照记录的内容。
+                # n=1 → 取队列末尾那轮（写操作前的打点，正是要救回的状态）。
+                # 目标索引: idx = len(q)-n。若越界，回退到队列最旧可用快照（基线兜底）。
+                idx = max(0, len(q) - n)
                 ts, sha, content = q[idx]
                 if content is None:
                     summary["skipped"].append(fp)

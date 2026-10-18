@@ -94,6 +94,21 @@ class CronConfig:
 
 
 @dataclass
+class SnapshotConfig:
+    """沙箱快照回滚配置（v2.6.0）
+
+    写操作前自动打点，改坏后可 /snap rollback 恢复到写前状态。
+    """
+    enabled: bool = True               # 是否启用快照回滚
+    depth: int = 3                     # 滚动快照轮数（1-9）
+    monitor: List[str] = field(default_factory=lambda: [
+        "elysia.json", "elysia_agent/config/",
+    ])                                  # 监控的文件/目录（相对项目根）
+    backup_dir: str = ""               # 持久化备份目录（空=纯内存）
+    hook_enabled: bool = True          # 是否注册 before_act 自动打点钩子
+
+
+@dataclass
 class ServerConfig:
     """服务端配置"""
     host: str = "0.0.0.0"
@@ -359,6 +374,7 @@ class Settings:
     mcp: MCPConfig = field(default_factory=MCPConfig)             # MCP 客户端（阶段二）
     tool_chain: ToolChainConfig = field(default_factory=ToolChainConfig)  # 工具链（阶段二 v2.6.0）
     cron: CronConfig = field(default_factory=CronConfig)          # 定时任务（阶段二 v2.6.0 收官）
+    snapshot: SnapshotConfig = field(default_factory=SnapshotConfig)  # 沙箱快照回滚
 
     def __post_init__(self):
         # 所有构造路径（默认构造 / from_dict / from_file）都应用环境变量覆盖
@@ -482,6 +498,8 @@ class Settings:
             settings.tool_chain = _dict_to_dataclass(settings.tool_chain, data["tool_chain"])
         if "cron" in data:
             settings.cron = _dict_to_dataclass(settings.cron, data["cron"])
+        if "snapshot" in data:
+            settings.snapshot = _dict_to_dataclass(settings.snapshot, data["snapshot"])
         if "mcp" in data:
             mcp_raw = data["mcp"]
             if isinstance(mcp_raw, dict):

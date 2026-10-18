@@ -140,7 +140,15 @@ class SnapshotBeforeActHook(IHook):
 
 
 def install_snapshot_hooks() -> None:
-    """注册 before_act 快照钩子到全局 HookRegistry（幂等）"""
+    """注册 before_act 快照钩子到全局 HookRegistry（幂等）
+
+    幂等实现：注册前先检查同名钩子是否已存在。早前版本注释写了「幂等」
+    但直接 register，重复调用会把钩子叠加多次（before_act 被触发多轮打点）。
+    """
     from ..registry.hook_registry import HookRegistry
+    existing = HookRegistry.list_hooks("before_act")
+    if "snapshot_before_act" in existing:
+        logger.debug("快照 before_act 钩子已存在，跳过重复注册")
+        return
     HookRegistry.register(SnapshotBeforeActHook())
     logger.info("快照 before_act 钩子已注册（工具执行前自动存档）")
