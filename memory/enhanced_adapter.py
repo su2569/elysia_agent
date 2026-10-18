@@ -102,13 +102,22 @@ class EnhancedMemory(IMemoryService):
 
     async def search(
         self, query: str, search_type: str = "hybrid",
-        group_id: Optional[str] = None, limit: int = 10, **filters
+        group_id: Optional[str] = None, limit: int = 10,
+        user_id: Optional[str] = None, **filters
     ) -> List[Dict[str, Any]]:
-        """搜索记忆（增强版，支持节点搜索）"""
-        base_results = await self.base_memory.search(query, search_type, group_id, limit, **filters)
+        """搜索记忆（增强版，支持节点搜索）
 
-        # 同时搜索节点
-        nodes = await self.node_manager.search_nodes(query, limit=limit)
+        user_id: 传入时只返回该用户的记忆（用户隔离边界）。
+        """
+        base_results = await self.base_memory.search(
+            query, search_type, group_id, limit, user_id=user_id, **filters
+        )
+
+        # 同时搜索节点；限定用户时不做全局节点搜索，避免越界
+        if user_id is not None:
+            nodes = []
+        else:
+            nodes = await self.node_manager.search_nodes(query, limit=limit)
         node_results = [{"type": "node", **n.to_dict()} for n in nodes]
 
         return base_results + node_results

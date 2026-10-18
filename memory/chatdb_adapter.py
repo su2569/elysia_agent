@@ -158,7 +158,8 @@ class ChatDBMemory(IMemoryService):
 
     async def search(
         self, query: str, search_type: str = "hybrid",
-        group_id: Optional[str] = None, limit: int = 10, **filters
+        group_id: Optional[str] = None, limit: int = 10,
+        user_id: Optional[str] = None, **filters
     ) -> List[Dict[str, Any]]:
         method_map = {
             "fulltext": "search.fulltext",
@@ -170,6 +171,8 @@ class ChatDBMemory(IMemoryService):
         params = {"query": query, "limit": limit}
         if group_id:
             params["group_id"] = group_id
+        if user_id is not None:
+            params["user_id"] = user_id
         params.update(filters)
 
         result = await self._rpc_call(method, params)

@@ -226,9 +226,10 @@ class CommandHandler:
         if runner is None or runner.memory is None:
             return "记忆系统未启用"
         try:
+            # 安全边界：必须限定为调用者本人，否则会清空全部用户的记忆
             results = await runner.memory.search(
                 query="", search_type="time", limit=500,
-                group_id=ctx.group_id,
+                group_id=ctx.group_id, user_id=ctx.user_id,
             )
             count = 0
             for m in results:
@@ -249,9 +250,10 @@ class CommandHandler:
             return "会话已重置（无记忆系统）"
         try:
             # 删除最近会话记录（retrieve 拿到的 session 历史来自 recent，重置即清 recent 级记忆）
+            # 安全边界：必须限定为调用者本人，否则会重置全部用户的近期记录
             results = await runner.memory.search(
                 query="", search_type="time", limit=50,
-                group_id=ctx.group_id,
+                group_id=ctx.group_id, user_id=ctx.user_id,
             )
             count = 0
             for m in results[:20]:

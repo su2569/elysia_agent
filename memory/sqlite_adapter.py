@@ -300,8 +300,14 @@ class SQLiteMemory(IMemoryService):
 
     async def search(
         self, query: str, search_type: str = "hybrid",
-        group_id: Optional[str] = None, limit: int = 10, **filters
+        group_id: Optional[str] = None, limit: int = 10,
+        user_id: Optional[str] = None, **filters
     ) -> List[Dict[str, Any]]:
+        """搜索记忆。
+
+        user_id: 传入时只返回该用户的记忆。**这是用户隔离边界**，
+                 不传等于跨用户搜索，调用方（如 /clear、/reset）必须显式传入。
+        """
         await self._ensure_init()
         async with self._op_lock:
             conn = self._conn
@@ -311,16 +317,16 @@ class SQLiteMemory(IMemoryService):
                     sql = (
                         "SELECT * FROM messages WHERE id IN "
                         "(SELECT rowid FROM msg_fts WHERE msg_fts MATCH ?) "
-                        "AND group_id = ? LIMIT ?"
+                        "AND group_id = ? AND (? IS NULL OR user_id = ?) LIMIT ?"
                     )
-                    params = (safe_query, group_id, limit)
+                    params = (safe_query, group_id, user_id, user_id, limit)
                 else:
                     sql = (
                         "SELECT * FROM messages WHERE id IN "
                         "(SELECT rowid FROM msg_fts WHERE msg_fts MATCH ?) "
-                        "AND group_id IS NULL LIMIT ?"
+                        "AND group_id IS NULL AND (? IS NULL OR user_id = ?) LIMIT ?"
                     )
-                    params = (safe_query, limit)
+                    params = (safe_query, user_id, user_id, limit)
                 try:
                     async with conn.execute(sql, params) as cursor:
                         rows = await cursor.fetchall()
@@ -329,11 +335,13 @@ class SQLiteMemory(IMemoryService):
                     rows = []
             else:
                 if group_id:
-                    sql = "SELECT * FROM messages WHERE content LIKE ? AND group_id = ? ORDER BY created_at DESC LIMIT ?"
-                    params = (f"%{query}%", group_id, limit)
+                    sql = ("SELECT * FROM messages WHERE content LIKE ? AND group_id = ? "
+                           "AND (? IS NULL OR user_id = ?) ORDER BY created_at DESC LIMIT ?")
+                    params = (f"%{query}%", group_id, user_id, user_id, limit)
                 else:
-                    sql = "SELECT * FROM messages WHERE content LIKE ? AND group_id IS NULL ORDER BY created_at DESC LIMIT ?"
-                    params = (f"%{query}%", limit)
+                    sql = ("SELECT * FROM messages WHERE content LIKE ? AND group_id IS NULL "
+                           "AND (? IS NULL OR user_id = ?) ORDER BY created_at DESC LIMIT ?")
+                    params = (f"%{query}%", user_id, user_id, limit)
                 async with conn.execute(sql, params) as cursor:
                     rows = await cursor.fetchall()
             return [dict(r) for r in rows]
