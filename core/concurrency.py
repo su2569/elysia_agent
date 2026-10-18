@@ -86,6 +86,8 @@ class ConcurrentRateLimiter:
                 return False
             self._buckets[user_id].append(now)
             return True
+
+    async def get_remaining(self, user_id: str) -> int:
         """获取剩余可用请求数"""
         async with self._lock:
             now = time.time()
