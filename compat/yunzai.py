@@ -516,6 +516,20 @@ class YunzaiCompatAdapter:
                 p["enabled"] = False
         return True
 
+    async def reload(self, name: str) -> bool:
+        """重载单个 Yunzai 兼容插件（Node 宿主内卸载后按最新代码重新加载）。
+
+        对齐原生 PluginManager.reload 与 AstrBot /plugin reload 语义：
+        Node 宿主按来源标记移除实例后，重新扫描该插件目录并实例化。
+        """
+        if name not in self.discover():
+            return False
+        # 已加载则先在宿主内卸载（移除旧实例），再重新加载
+        if self._is_loaded(name):
+            if not await self.unload(name):
+                return False
+        return await self.load(name)
+
     def get_state_summary(self) -> List[Dict[str, Any]]:
         """兼容层状态摘要（与原生 PluginManager.get_state_summary 结构对齐）"""
         return [

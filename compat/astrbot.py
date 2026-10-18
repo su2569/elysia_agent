@@ -135,10 +135,35 @@ _CURRENT_LOADING_PLUGIN: str = ""
 _CURRENT_LOADING_MODULE_PATH: str = ""
 
 
+class _PlatformManagerStub:
+    """platform_manager 桩对象
+
+    部分兼容层插件（如 astrbot_plugin_custom_trigger 的 AdapterManager）会调用
+    `context.platform_manager.get_insts()` 探测平台实例。shim 中并无真实的
+    平台管理器（本框架的适配器不在 astrbot 的 platform 体系内），因此这里提供
+    空实现：返回空列表，让插件走「未检测到适配器」的既有分支，避免每次探测都
+    抛 AttributeError 并在启动期刷出数十条 WARNING。
+
+    后续若需要让此类插件真正拿到适配器，可在 `register_platform()` 中登记，
+    get_insts() 会原样返回。
+    """
+
+    def __init__(self):
+        self._insts: List[Any] = []
+
+    def register_platform(self, platform: Any) -> None:
+        if platform is not None:
+            self._insts.append(platform)
+
+    def get_insts(self) -> List[Any]:
+        return list(self._insts)
+
+
 class Context:
     """astrbot Context（shim）"""
     def __init__(self):
         self.server = type("Server", (), {"config": {}})()
+        self.platform_manager = _PlatformManagerStub()
 
     def get_all_stars(self) -> List[Any]:
         """返回所有已注册的 Star 实例（help 插件使用）"""
@@ -760,6 +785,18 @@ class AstrBotCompatAdapter:
             if p["name"] == name:
                 p["enabled"] = False
         return True
+
+    def reload(self, name: str) -> bool:
+        """重载单个 AstrBot 兼容插件（卸载后按最新代码重新加载）。
+
+        对齐原生 PluginManager.reload 与 AstrBot /plugin reload 语义：
+        先清命令/处理器/Star 实例/模块缓存，再重新 exec 插件代码。
+        """
+        # 已加载则先卸载（清缓存，确保重新 exec 最新代码）
+        if any(p["name"] == name and p["ok"] for p in self.load_progress):
+            if not self.unload(name):
+                return False
+        return self.load(name)
 
     def get_state_summary(self) -> List[Dict[str, Any]]:
         """兼容层状态摘要（与原生 PluginManager.get_state_summary 结构对齐）"""

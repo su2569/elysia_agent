@@ -2,12 +2,26 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 
+# 标准工具调用块（OpenAI 兼容格式）
+# 各 Provider 将原生协议归一化为此结构：
+#   {"id": "...", "type": "function", "function": {"name": "...", "arguments": "{...}"}}
+ToolCall = Dict[str, Any]
+
+
 class LLMResponse:
     """LLM响应封装"""
-    def __init__(self, content: str, raw: Any = None, usage: Optional[Dict] = None):
+    def __init__(self, content: str, raw: Any = None, usage: Optional[Dict] = None,
+                 tool_calls: Optional[List[ToolCall]] = None):
         self.content = content
         self.raw = raw
         self.usage = usage or {}
+        # 原生函数调用列表（OpenAI 兼容归一化格式）。None/空 = 模型未发起工具调用
+        self.tool_calls = tool_calls or []
+
+    @property
+    def has_tool_calls(self) -> bool:
+        """是否有原生工具调用"""
+        return bool(self.tool_calls)
 
     def __str__(self):
         return self.content

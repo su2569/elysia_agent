@@ -172,3 +172,181 @@ async def recall(query: str, topk: int = 3, _ctx=None) -> str:
             except Exception as e:
                 return f"【错误】记忆检索失败: {str(e)}"
     return "【提示】记忆系统未启用"
+
+
+# =====================================================================
+# DeepSeek 官方 Search & Fetch 服务商工具
+# 文档: https://api-docs.deepseek.com/guides/search/
+#  - Search: POST https://api.deepseek.com/v1/tools/search
+#  - Fetch : POST https://api.deepseek.com/v1/tools/fetch
+# 鉴权: Authorization: Bearer <DeepSeek API Key>（按请求计费，详见官方文档）
+# =====================================================================
+
+_DEEPSEEK_TOOLS_BASE = "https://api.deepseek.com/v1/tools"
+_NL = chr(10)  # 换行符（避免源码中转义问题）
+
+
+def _deepseek_api_key() -> str:
+    """解析 DeepSeek 服务商工具所需的 API Key。
+
+    优先级: DEEPSEEK_API_KEY > ELYSIA_LLM_API_KEY > OPENAI_API_KEY
+    """
+    import os
+    for name in ("DEEPSEEK_API_KEY", "ELYSIA_LLM_API_KEY", "OPENAI_API_KEY"):
+        key = os.getenv(name, "").strip()
+        if key:
+            return key
+    return ""
+
+
+def _fmt_deepseek_error(e, endpoint: str) -> str:
+    """格式化请求异常信息"""
+    return f"【DeepSeek {endpoint} 错误】{type(e).__name__}: {e}"
+
+
+@tool(
+    name="deepseek_search",
+    description=(
+        "使用 DeepSeek 官方搜索引擎搜索互联网（DeepSeek tools/search），"
+        "返回结构化结果（标题/链接/摘要）。适合获取实时资讯与网页检索。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词，支持 site: / lang: / after: 等查询操作符，1~128 字符",
+            },
+            "count": {
+                "type": "integer",
+                "description": "返回结果数量，1~50，默认 10",
+                "minimum": 1,
+                "maximum": 50,
+            },
+            "need_content": {
+                "type": "boolean",
+                "description": "是否返回每条结果的网页正文 content，默认 false",
+            },
+        },
+        "required": ["query"],
+    },
+    category="web",
+)
+async def deepseek_search(query: str, count: int = 10, need_content: bool = False, _ctx=None) -> str:
+    """DeepSeek 官方网页搜索（tools/search）"""
+    api_key = _deepseek_api_key()
+    if not api_key:
+        return (
+            "【配置缺失】未检测到 DeepSeek API Key。"
+            + chr(10)
+            + "请在 .env 中设置以下任一变量后重启："
+            + chr(10)
+            + "  DEEPSEEK_API_KEY  /  ELYSIA_LLM_API_KEY"
+        )
+
+    import aiohttp
+    url = f"{_DEEPSEEK_TOOLS_BASE}/search"
+    payload = {
+        "query": query,
+        "count": max(1, min(int(count or 10), 50)),
+        "need_content": bool(need_content),
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    return f"【DeepSeek search 失败】HTTP {resp.status}: {body[:300]}"
+                data = await resp.json()
+    except Exception as e:
+        return _fmt_deepseek_error(e, "search")
+
+    results = data.get("results") or []
+    if not results:
+        return f"【搜索结果】关于「{query}」未找到相关结果。"
+
+    lines = [f"【DeepSeek 搜索结果】关于「{query}」（共 {len(results)} 条）:{_NL}"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title") or "(无标题)"
+        url = r.get("url") or ""
+        snippet = r.get("snippet") or r.get("summary") or ""
+        site = r.get("site_name") or ""
+        date = (r.get("date") or "")[:10]
+        meta = " | ".join(x for x in (site, date) if x)
+        lines.append(f"{i}. {title}{_NL}   链接: {url}")
+        if meta:
+            lines.append(f"   来源: {meta}")
+        if snippet:
+            lines.append(f"   摘要: {snippet[:200]}")
+        if need_content and r.get("content"):
+            lines.append(f"   正文: {r['content'][:500]}")
+    return _NL.join(lines)
+
+
+@tool(
+    name="deepseek_fetch",
+    description=(
+        "使用 DeepSeek 官方抓取接口（DeepSeek tools/fetch）抓取单个网页，"
+        "以 Markdown 文本返回页面正文。适合提取网页详细内容供阅读。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "要抓取的网页 URL（http/https，≤8192 字符）",
+            },
+        },
+        "required": ["url"],
+    },
+    category="web",
+)
+async def deepseek_fetch(url: str, _ctx=None) -> str:
+    """DeepSeek 官方网页抓取（tools/fetch）"""
+    api_key = _deepseek_api_key()
+    if not api_key:
+        return (
+            "【配置缺失】未检测到 DeepSeek API Key。"
+            + chr(10)
+            + "请在 .env 中设置以下任一变量后重启："
+            + chr(10)
+            + "  DEEPSEEK_API_KEY  /  ELYSIA_LLM_API_KEY"
+        )
+
+    if not (url or "").strip().lower().startswith(("http://", "https://")):
+        return "【参数错误】url 必须是以 http:// 或 https:// 开头的完整网页地址。"
+
+    import aiohttp
+    api_url = f"{_DEEPSEEK_TOOLS_BASE}/fetch"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json={"url": url.strip()}, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    return f"【DeepSeek fetch 失败】HTTP {resp.status}: {body[:300]}"
+                data = await resp.json()
+    except Exception as e:
+        return _fmt_deepseek_error(e, "fetch")
+
+    title = data.get("title") or "(无标题)"
+    content = data.get("content") or ""
+    if not content.strip():
+        return f"【抓取结果】「{title}」未获取到可用正文（目标站点可能被限制或无可提取内容）。"
+    # 限制返回长度，避免上下文超限
+    return f"【DeepSeek 抓取结果】{_NL}标题: {title}{_NL}{_NL}{content[:4000]}"

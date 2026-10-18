@@ -303,7 +303,9 @@ class MCPServerConfig:
     url: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
     # ---- 其他 ----
-    timeout: int = 60                 # 该服务器单次请求超时（秒）
+    timeout: int = 60                 # 该服务器单次请求超时（秒，1min 默认）
+    kill_timeout: int = 180           # 该服务器强制停止阈值（秒，3min 默认）
+    async_exec: bool = False          # 该服务器异步执行开关
 
 
 @dataclass
@@ -313,7 +315,9 @@ class MCPConfig:
     strict_command_validation: bool = True   # stdio 命令注入防御校验
     max_tools_per_server: int = 200   # 防恶意服务器淹没注册表
     connect_timeout: int = 30
-    request_timeout: int = 60
+    request_timeout: int = 60         # 单次请求小超时（默认 1 分钟）
+    kill_timeout: int = 180           # 强制停止/强停阈值（默认 3 分钟）
+    async_exec: bool = False          # 异步执行开关（远端调用走独立任务，不阻塞主链路）
     servers: List[MCPServerConfig] = field(default_factory=list)
 
 
@@ -340,6 +344,9 @@ class Settings:
     memory_node: MemoryNodeConfig = field(default_factory=MemoryNodeConfig)
     log: LogConfig = field(default_factory=LogConfig)
     personality: PersonalityConfig = field(default_factory=PersonalityConfig)
+    # 多人格库：每项 {id, name, description, style, background}；active_personality 为当前生效 id
+    personalities: List[Dict[str, Any]] = field(default_factory=list)
+    active_personality: str = ""
     concurrency: Optional[ConcurrencyConfig] = None  # None = 使用旧实现（无并发控制）
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     self_check: SelfCheckConfig = field(default_factory=SelfCheckConfig)
@@ -447,6 +454,13 @@ class Settings:
         if "personality" in data:
             if isinstance(data["personality"], dict):
                 settings.personality = _dict_to_dataclass(settings.personality, data["personality"])
+        # 多人格库
+        if isinstance(data.get("personalities"), list):
+            settings.personalities = [
+                dict(item) for item in data["personalities"] if isinstance(item, dict)
+            ]
+        if isinstance(data.get("active_personality"), str):
+            settings.active_personality = data["active_personality"]
         if "concurrency" in data:
             if isinstance(data["concurrency"], dict):
                 if settings.concurrency is None:
@@ -495,7 +509,32 @@ class Settings:
         # 环境变量覆盖
         settings._apply_env_overrides()
 
+        # 多人格：把当前生效人格同步到 personality 段
+        settings.resolve_active_personality()
+
         return settings
+
+    def resolve_active_personality(self) -> None:
+        """将 personalities 中当前生效的人格同步到 personality 段。
+
+        - 未配置多人格库时不做任何处理，保持旧行为（单一 personality）。
+        - active_personality 缺失或找不到时，回退到第一个并回写 active_personality。
+        """
+        if not self.personalities:
+            return
+        target = None
+        if self.active_personality:
+            for item in self.personalities:
+                if item.get("id") == self.active_personality:
+                    target = item
+                    break
+        if target is None:
+            target = self.personalities[0]
+            self.active_personality = str(target.get("id") or "")
+        for key in ("name", "description", "style", "background"):
+            value = target.get(key)
+            if isinstance(value, str) and value != "":
+                setattr(self.personality, key, value)
 
     def _apply_env_overrides(self):
         """环境变量覆盖配置"""

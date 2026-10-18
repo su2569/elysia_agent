@@ -375,6 +375,34 @@ class ElysiaRunner:
             if self._use_concurrency and self._session_sem:
                 await self._session_sem.release(session_id)
 
+    def _record_token_usage(self, resp, session_id: str = "") -> None:
+        """统一记录一次 LLM 调用的 token 用量。
+
+        放在 Runner 的单一出口处，任何 Provider（含第三方插件适配器）
+        只要在 LLMResponse.usage 里带用量就会被统计到，无需逐个适配器埋点。
+        任何异常都被吞掉，绝不影响主链路。
+        """
+        try:
+            # Provider 侧已记录过的响应不再重复计数（见 main.py OpenAILLM.chat 的 token_recorded 标记）
+            if getattr(resp, "token_recorded", False):
+                return
+            usage = getattr(resp, "usage", None)
+            if not usage:
+                return
+            if not isinstance(usage, dict):
+                usage = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
+            from . import token_stats
+            llm_cfg = getattr(self.settings, "llm", None)
+            token_stats.record(
+                model=getattr(llm_cfg, "model", "") or getattr(self.llm, "model", "") or "",
+                usage=usage,
+                source="llm",
+                session=session_id or "",
+                provider=getattr(self.llm, "name", "") or getattr(llm_cfg, "provider", "") or "",
+            )
+        except Exception as e:
+            logger.debug(f"token usage 记录失败（已忽略）: {e}")
+
     async def _run_inner(self, user_id, query, images, audio, group_id, platform, personality, **kwargs):
         """核心运行逻辑"""
         session_id = kwargs.get("session_id", "") or f"sess_{user_id}_{int(time.time() * 1000)}"
@@ -520,6 +548,7 @@ class ElysiaRunner:
                     break
 
                 ctx.llm_raw_response = resp
+                self._record_token_usage(resp, session_id)
                 parsed = self._parse_llm_response(resp)
                 thought = parsed.get("thought", "")
                 action = parsed.get("action")

@@ -828,12 +828,16 @@ class MCPManager:
         max_tools_per_server: int = 200,
         connect_timeout: float = 30.0,
         request_timeout: float = 60.0,
+        kill_timeout: float = 180.0,
+        async_exec: bool = False,
     ) -> None:
         self._server_cfgs: List[Any] = list(servers or [])
         self._strict = strict_command_validation
         self._max_tools = max_tools_per_server
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
+        self._kill_timeout = kill_timeout
+        self._async_exec = async_exec
         # name → {"client": MCPClient, "tools": [MCPTool], "error": str|None}
         self._servers: Dict[str, Dict[str, Any]] = {}
 
@@ -848,6 +852,8 @@ class MCPManager:
             max_tools_per_server=getattr(mcp_config, "max_tools_per_server", 200),
             connect_timeout=float(getattr(mcp_config, "connect_timeout", 30)),
             request_timeout=float(getattr(mcp_config, "request_timeout", 60)),
+            kill_timeout=float(getattr(mcp_config, "kill_timeout", 180)),
+            async_exec=bool(getattr(mcp_config, "async_exec", False)),
         )
 
     def _cfg_get(self, cfg: Any, key: str, default: Any = None) -> Any:

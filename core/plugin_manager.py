@@ -14,6 +14,7 @@ v2.4.0 插件状态机（模仿 AstrBot 插件管理，强化内存控制）：
 import os
 import sys
 import json
+import asyncio
 import importlib.util
 from enum import Enum
 from typing import Dict, Any, Optional, List
@@ -23,6 +24,16 @@ from abc import ABC, abstractmethod
 from ..utils.logger import get_logger
 
 logger = get_logger("PluginManager")
+
+
+# ============ 插件生命周期超时保护（秒）============
+# reload/unload/swap/restore 链路上存在无超时 await 点
+# （on_unload、on_swap、exec 导入等），任一环节挂起都会卡死
+# 并可能连带阻塞后续插件操作。
+# 以下常量可覆盖/配置化；超时后仅放弃等待并告警，不假装已成功完成。
+RELOAD_ON_UNLOAD_TIMEOUT = 10.0   # on_unload / on_swap 等卸载类钩子超时上限
+RELOAD_IMPORT_TIMEOUT = 30.0      # 导入执行（exec_module/实例化）超时上限
+RELOAD_GLOBAL_TIMEOUT = 60.0      # 整个 reload 整体兜底超时
 
 
 class PluginState(str, Enum):
@@ -309,7 +320,18 @@ class PluginManager:
         return loaded
 
     async def _load_single(self, info: PluginInfo) -> IPlugin:
-        """加载单个插件"""
+        """加载单个插件
+        原生加载器只处理 kind == "native" 的 IPlugin 插件。
+        兼容层插件（astrbot/yunzai）由对应适配器加载；若被原生路径误调，直接拒绝并给出指引，
+        避免出现 "No __init__.py" / "No IPlugin subclass" 假象错误。
+        """
+        if info.kind != "native":
+            raise RuntimeError(
+                f"{info.name} 是 {info.kind} 兼容插件，需通过兼容层加载（"
+                f"astrbot_adapter / yunzai_adapter），原生加载器不支持。"
+                f"请在 elysia.yaml 启用对应 compat 层（astrbot_enabled/yunzai_enabled）"
+                f"并确保插件位于 compat 配置的插件目录。"
+            )
         # 临时添加插件目录到 sys.path，加载后移除，避免永久污染
         path_inserted = False
         if info.plugin_dir and info.plugin_dir not in sys.path:
@@ -328,7 +350,17 @@ class PluginManager:
 
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            # exec_module 是同步阻塞调用，wait_for 无法中断同步代码，
+            # 故放到后台线程 + 全局导入超时兜底（后台线程可能残留，见方案注记）
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(spec.loader.exec_module, module),
+                    timeout=RELOAD_IMPORT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                raise ImportError(
+                    f"Import of {info.name} timed out after {RELOAD_IMPORT_TIMEOUT}s"
+                )
 
             plugin_cls = None
             for attr_name in dir(module):
@@ -341,7 +373,10 @@ class PluginManager:
             if not plugin_cls:
                 raise ImportError(f"No IPlugin subclass found in {info.name}")
 
-            plugin = plugin_cls()
+            plugin = await asyncio.wait_for(
+                asyncio.to_thread(plugin_cls),
+                timeout=RELOAD_IMPORT_TIMEOUT,
+            )
             plugin.info.config.update(info.config)
             plugin.info.plugin_dir = info.plugin_dir
             # 同步 manifest 元信息（依赖/版本/类型），关联链重载依赖这些字段
@@ -468,7 +503,9 @@ class PluginManager:
         if not plugin:
             return False
         try:
-            await plugin.on_unload(self)
+            await asyncio.wait_for(plugin.on_unload(self), timeout=RELOAD_ON_UNLOAD_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"on_unload for {name} timed out after {RELOAD_ON_UNLOAD_TIMEOUT}s (waived, unloading continues)")
         except Exception as e:
             logger.warning(f"on_unload error for {name}: {e}")
         self._infos.pop(name, None)
@@ -492,7 +529,13 @@ class PluginManager:
         if not plugin:
             return False
         try:
-            await plugin.on_swap(self)
+            # on_swap 为待 await 点，套超时避免挂起卡死 swap 链
+            await asyncio.wait_for(plugin.on_swap(self), timeout=RELOAD_ON_UNLOAD_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"on_swap for {name} timed out after "
+                f"{RELOAD_ON_UNLOAD_TIMEOUT}s (waived, swappping continues)"
+            )
         except Exception as e:
             logger.warning(f"on_swap error for {name}: {e}")
         info = self._infos.pop(name, None)
@@ -531,6 +574,55 @@ class PluginManager:
         except Exception as e:
             logger.error(f"Failed to restore plugin {name}: {e}", exc_info=True)
             return False
+
+    async def reload(self, name: str) -> bool:
+        """重载单个插件：内存卸载（不持久化禁用）后按最新代码重新加载。
+
+        与 unload(persist=True) 的区别：不会把插件写入 disabled 列表，
+        重载后立即可用（对齐 AstrBot /plugin reload 语义）。
+
+        带整体兜底超时：若内部卸载/导入任一环节挂起超过 RELOAD_GLOBAL_TIMEOUT，
+        强制放弃并返回 False，防止撞上串行锁时连带阻塞后续插件操作。
+        """
+        try:
+            return await asyncio.wait_for(
+                self._reload_inner(name), timeout=RELOAD_GLOBAL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"reload of {name} timed out after {RELOAD_GLOBAL_TIMEOUT}s")
+            return False
+
+    async def _reload_inner(self, name: str) -> bool:
+        """reload() 的实际实现体（由 reload 用 wait_for 兜底超时包裹）"""
+        # 内存卸载（persist=False：不污染 disabled，供重载复用）
+        if name in self._plugins:
+            await self.unload(name, persist=False)
+        # 定位插件信息：优先当前插件目录发现，回退 SWAP 快照
+        info = None
+        for d in self.discover():
+            if d.name == name:
+                info = d
+                break
+        if info is None:
+            info = self._load_swap_snapshot(name)
+        if info is None:
+            logger.warning(f"Plugin {name} not found for reload")
+            return False
+        try:
+            await self._load_single(info)
+        except Exception as e:
+            logger.error(f"Failed to reload plugin {name}: {e}", exc_info=True)
+            return False
+        # 清除持久化禁用/搬运标记，确保重载后生效
+        changed = False
+        for key in ("disabled", "swapped"):
+            if name in self._persisted[key]:
+                self._persisted[key].remove(name)
+                changed = True
+        if changed:
+            self._save_persisted_state()
+        logger.info(f"Plugin {name} reloaded")
+        return True
 
     async def unload_all(self) -> None:
         for name in list(self._plugins.keys()):
