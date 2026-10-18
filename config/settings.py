@@ -104,6 +104,8 @@ class ServerConfig:
     heartbeat_interval: int = 30
     enable_cors: bool = True
     auth_token: str = ""
+    # 写接口访问控制：local_only（仅本机，默认）| token（需 auth_token）| off（不拦截）
+    write_guard: str = "local_only"
 
 
 @dataclass
