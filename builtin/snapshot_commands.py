@@ -49,7 +49,8 @@ async def _cmd_snap_status(ctx: CommandContext) -> str:
 
 
 async def _cmd_snap_list(ctx: CommandContext) -> str:
-    query = " ".join(ctx.parts[1:]) if ctx.parts else ""
+    # parts 形如 ['/snap', 'list', <过滤词...>]，过滤词从下标 2 起
+    query = " ".join(ctx.parts[2:]) if len(ctx.parts) > 2 else ""
     hist = snap.history(query)
     if not hist:
         return "未发现已快照文件" + (f"（匹配: {query}）" if query else "")
@@ -68,9 +69,10 @@ async def _cmd_snap_rollback(ctx: CommandContext) -> str:
     if not snap.is_active():
         return "快照系统未激活，无法回滚。"
     n = 1
-    if len(ctx.parts) > 1:
+    # parts 形如 ['/snap', 'rollback', <n>]，轮次从下标 2 起
+    if len(ctx.parts) > 2:
         try:
-            n = int(ctx.parts[1])
+            n = int(ctx.parts[2])
         except ValueError:
             n = 1
     if n < 1:
@@ -94,9 +96,33 @@ async def _cmd_snap_rollback(ctx: CommandContext) -> str:
     return "\n".join(lines)
 
 
+async def _cmd_snap_dispatch(ctx: CommandContext) -> str:
+    """统一入口：/snap [status|list|rollback] ...
+
+    早前版本把 install_snapshot_commands 里的 "snap" 直接绑到 _cmd_snap_status，
+    导致 /snap list、/snap rollback 永远只返回状态页——rollback 这条关键
+    命令实际上从未可用。此处按子命令分发。
+    """
+    parts = ctx.parts
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+    if sub in ("status", "st", ""):
+        return await _cmd_snap_status(ctx)
+    if sub in ("list", "ls"):
+        return await _cmd_snap_list(ctx)
+    if sub in ("rollback", "rb", "restore"):
+        return await _cmd_snap_rollback(ctx)
+    return "\n".join([
+        f"未知子命令: {sub}",
+        "用法: /snap [status|list|rollback] [n]",
+        "  status   查看快照系统状态",
+        "  list [词] 列出文件快照历史",
+        "  rollback [n] 回滚到前 n 轮（默认 1）",
+    ])
+
+
 def install_snapshot_commands(handler) -> None:
     """把快照命令挂到 CommandHandler（不修改内置命令列表）"""
-    handler.register("snap", _cmd_snap_status, "快照回滚系统状态（/snap status|list|rollback）", hidden=False)
+    handler.register("snap", _cmd_snap_dispatch, "快照回滚系统状态（/snap status|list|rollback）", hidden=False)
     # 为便于 /help 展示，仍用 /snap 统一入口；子命令在内部解析。
     logger.info("快照回滚命令已安装（/snap status|list|rollback）")
 

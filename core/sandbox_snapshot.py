@@ -95,6 +95,15 @@ class SandboxSnapshot:
     def is_active(self) -> bool:
         return self.active
 
+    def reset(self) -> None:
+        """清空全部运行时状态并转为未激活。
+
+        单例的 activate() 在已激活时直接返回 True（幂等），不会重置 monitor
+        与历史。测试之间、或运行期需要换监控根时，必须先 reset，否则旧的
+        监控根与快照会残留。生产启动路径不需要调用（每次是新进程）。
+        """
+        self._init()
+
     # ==================== 路径处理 ====================
 
     def _covered(self, path: str) -> Optional[str]:
@@ -219,12 +228,19 @@ class SandboxSnapshot:
         }
 
     def history(self, path: str = "") -> List[Dict[str, Any]]:
-        """查看某路径（或全部）的快照历史"""
+        """查看快照历史。
+
+        path 为空返回全部；否则按关键词做大小写不敏感的路径子串匹配。
+        早前实现要求 path 命中监控根（_covered），意味着调用方必须传完整
+        路径，`/snap list cfg` 这类关键词查询永远返回空——与命令提示
+        「list [词]」不符。
+        """
+        kw = (path or "").strip().lower()
         out = []
         for root in self.monitor:
-            if path and not self._covered(path):
-                continue
             for fp in self._collect_files(root):
+                if kw and kw not in fp.lower():
+                    continue
                 q = self.snapshots.get(fp)
                 if q:
                     out.append({
