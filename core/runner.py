@@ -165,7 +165,7 @@ class ElysiaRunner:
         # 反向引用：插件通过 manager.runner 访问 Runner（扩展点/补丁用）
         self.plugin_manager.runner = self
 
-        # v2.4.0：模块崩溃恢复（重载关联链 / 完全重载，最多自动重载 1 次）
+        # v2.4.0：模块崩溃恢复（重载关联链 -> 完全重载 -> 放弃，最多自动重载 2 次）
         from ..core.recovery import ModuleRecovery
         self.recovery = ModuleRecovery(
             plugin_manager=self.plugin_manager,
