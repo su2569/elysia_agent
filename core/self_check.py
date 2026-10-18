@@ -54,6 +54,8 @@ CMD_INJECTION_RE = re.compile(
     r'|`|\$\(|\b(?:sudo|eval|exec)\s+[a-z][\w./]*)', re.IGNORECASE)
 # 内网地址（SSRF）
 SSRF_HOST_RE = re.compile(r'^((127\.0\.0\.1|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|localhost|\[::1\]|::1))', re.IGNORECASE)
+# 完整 URL 的 scheme://host 部分（host 到第一个 / ? # 为止）
+URL_HOST_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9+.\-]*://([^\s\'"<>/?#]+)')
 # 危险文件系统路径
 DANGEROUS_PATH_RE = re.compile(r'(/etc/passwd|/etc/shadow|/proc/|C:\\windows\\system32|/boot/|/dev/sd)', re.IGNORECASE)
 # 裸危险命令
@@ -79,9 +81,19 @@ class VulnerabilityScanner:
 
     @staticmethod
     def scan_ssrf(text: str) -> Optional[str]:
+        # 先按空白/逗号切分，逐个 token 检查裸主机名（如 "127.0.0.1"）
         for part in re.split(r'[\s,\'"]+', text):
             if SSRF_HOST_RE.match(part):
                 return f"SSRF 模式（内网地址 {part[:40]}）"
+        # 再解析完整 URL：http://127.0.0.1:8080/x 的 host 才是 127.0.0.1
+        # （裸 token 检查对带 scheme 的 URL 天然失效，因为 token 以 "http://" 开头）
+        for m in URL_HOST_RE.finditer(text):
+            host = m.group(1)
+            # 剥离 userinfo：user:pass@host -> host
+            if "@" in host:
+                host = host.rsplit("@", 1)[1]
+            if SSRF_HOST_RE.match(host):
+                return f"SSRF 模式（内网地址 {host[:40]}）"
         return None
 
     @staticmethod
@@ -313,6 +325,17 @@ class SelfCheckMonitor:
                 "timestamp": time.time(),
                 "blocked_events": self._blocked_events[-200:],
             }
+            # 启动自检的逐项结果必须一并落盘，否则 run_startup_checks() 的
+            # 结论（尤其是 critical 项）在报告文件里完全看不到。
+            if self.report is not None:
+                data["checks"] = [
+                    {"name": c.name, "passed": c.passed,
+                     "detail": c.detail, "severity": c.severity}
+                    for c in self.report.checks
+                ]
+                data["all_passed"] = self.report.all_passed
+                data["critical_issues"] = [c.name for c in self.report.critical_issues()]
+                data["check_timestamp"] = self.report.timestamp
             Path(self.report_file).write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
