@@ -25,6 +25,41 @@ from .utils.logger import get_logger
 
 logger = get_logger("Lifecycle")
 
+# 监督间隔下界与默认值。
+# 传 0 或负数时 asyncio.wait_for(timeout=0) 会立即返回，形成忙循环
+# （实测 interval=0 时 0.3 秒内扫描 17580 次，吃满一个核心）。
+MIN_SUPERVISOR_INTERVAL = 0.5
+DEFAULT_SUPERVISOR_INTERVAL = 5.0
+
+
+def _coerce_interval(value, default: float = DEFAULT_SUPERVISOR_INTERVAL) -> float:
+    """把任意输入收敛成合法的监督间隔。
+
+    非法值（None / 字符串 / nan / inf）一律回落默认值；
+    数值则夹取到 [MIN_SUPERVISOR_INTERVAL, +inf)。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if v != v or v in (float("inf"), float("-inf")):  # nan / inf
+        return default
+    if v < MIN_SUPERVISOR_INTERVAL:
+        return MIN_SUPERVISOR_INTERVAL
+    return v
+
+
+def _platform_name(platform) -> str:
+    """安全地取平台名：name -> platform_type -> unknown，全程不抛。"""
+    for attr in ("name", "platform_type"):
+        try:
+            v = getattr(platform, attr, None)
+        except Exception:
+            v = None
+        if v:
+            return str(v)
+    return "unknown"
+
 
 class PlatformSupervisor:
     """单平台监督器：平台崩溃/断线时自动重启，不结束宿主进程
@@ -45,6 +80,9 @@ class PlatformSupervisor:
         self.disabled = False
         self.last_error: Optional[str] = None
         self._backoff = 1.0
+        # 退避截止时刻（time.monotonic）。到点前 ensure_running 直接返回 False，
+        # 不再在内部 sleep——否则一个平台的退避会串行拖住整条监督链。
+        self._next_retry_at = 0.0
 
     @property
     def name(self) -> str:
@@ -56,6 +94,7 @@ class PlatformSupervisor:
 
     def reset_backoff(self) -> None:
         self._backoff = 1.0
+        self._next_retry_at = 0.0
 
     async def ensure_running(self) -> bool:
         """确保平台正在运行。返回 True 表示平台可用。"""
@@ -68,6 +107,10 @@ class PlatformSupervisor:
         if running:
             self.reset_backoff()
             return True
+
+        # 仍在退避窗口内：直接放弃本次，把控制权让给其它平台
+        if time.monotonic() < self._next_retry_at:
+            return False
 
         try:
             await self.platform.start()
@@ -87,9 +130,9 @@ class PlatformSupervisor:
                 logger.error(f"平台 {self.name} 连续失败 {self.failures} 次，已禁用（进程继续运行）")
             else:
                 backoff = self._next_backoff()
+                self._next_retry_at = time.monotonic() + backoff
                 logger.warning(f"平台 {self.name} 启动失败（{self.failures}/{self.max_failures}）: {e}，"
                                f"{backoff:.1f}s 后重试")
-                await asyncio.sleep(backoff)
             return False
 
     async def restart(self) -> bool:
@@ -129,19 +172,30 @@ class ServiceHost:
     ):
         self.runner = runner
         self.platforms = list(platforms or [])
-        self.supervisor_interval = supervisor_interval
+        self.supervisor_interval = _coerce_interval(supervisor_interval)
         self.auto_supervise = auto_supervise
         self._supervisors: Dict[str, PlatformSupervisor] = {}
+        # id(platform) -> supervisor。名字可能重复，按对象查才不会串。
+        self._by_platform: Dict[int, PlatformSupervisor] = {}
         self._stop_event = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
         self._closed = False
         self._started = False
 
         for p in self.platforms:
-            name = getattr(p, "name", getattr(p, "platform_type", "unknown"))
-            self._supervisors[name] = PlatformSupervisor(
-                p, max_failures=max_failures, max_backoff=max_backoff
-            )
+            base = _platform_name(p)
+            key = base
+            # 同名平台若直接以名字为键会互相覆盖：前一个既不启动也不监督，
+            # 且没有任何日志。这里加后缀区分，两个都留在表里。
+            n = 2
+            while key in self._supervisors:
+                key = f"{base}#{n}"
+                n += 1
+            if key != base:
+                logger.warning(f"平台名重复：{base}，本次以 {key} 登记（两个都会被监督）")
+            sup = PlatformSupervisor(p, max_failures=max_failures, max_backoff=max_backoff)
+            self._supervisors[key] = sup
+            self._by_platform[id(p)] = sup
 
     # ==================== 生命周期 ====================
 
@@ -160,7 +214,7 @@ class ServiceHost:
 
         if self.auto_supervise:
             for p in self.platforms:
-                sup = self._supervisors[getattr(p, "name", getattr(p, "platform_type", "unknown"))]
+                sup = self.supervisor_of(p)
                 try:
                     await sup.ensure_running()
                 except Exception as e:
@@ -184,11 +238,16 @@ class ServiceHost:
         self._tasks.clear()
 
         for p in self.platforms:
+            # 注意：getattr 的第三个参数会先求值，写成
+            # getattr(p, "name", p.platform_type) 时即使 name 存在也会访问
+            # platform_type，平台缺该属性就抛 AttributeError，导致后面的平台
+            # 和 Runner 全都停不下来。这里嵌套兜底。
+            label = _platform_name(p)
             try:
                 await p.stop()
-                logger.info(f"平台 {getattr(p, 'name', p.platform_type)} 已停止")
+                logger.info(f"平台 {label} 已停止")
             except Exception as e:
-                logger.warning(f"平台 {getattr(p, 'name', p.platform_type)} 停止异常: {e}")
+                logger.warning(f"平台 {label} 停止异常: {e}")
 
         if self.runner is not None:
             try:
@@ -261,6 +320,16 @@ class ServiceHost:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.supervisor_interval)
             except asyncio.TimeoutError:
                 pass
+
+    def supervisor_of(self, platform) -> Optional[PlatformSupervisor]:
+        """按平台对象取监督器（同名平台下比按名字取更可靠）"""
+        sup = self._by_platform.get(id(platform))
+        if sup is not None:
+            return sup
+        for s in self._supervisors.values():
+            if s.platform is platform:
+                return s
+        return None
 
     async def restart_platform(self, name: str) -> bool:
         """手动重启指定平台"""
