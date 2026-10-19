@@ -115,6 +115,30 @@ class OneBotWSServerAdapter(BasePlatformAdapter):
 
     # ==================== WS 连接处理 ====================
 
+    def _authorize(self, remote: str, token: str) -> bool:
+        """鉴权：有效 token 放行；本地回路无 token 放行；其余拒绝。
+
+        OneBot v11 正向 WS 约定：无 token 仅允许本地回路（127.0.0.1），
+        外部必须带有效 token。未配置 token 时只放行本地回路。
+
+        remote 为 request.remote，可能是 "host"、"host:port"、"[::1]:port"
+        或裸 IPv6 "::1"。需正确剥离端口后再判本地回路。
+        """
+        r = (remote or "").strip()
+        # 去掉方括号 IPv6 包裹，如 "[::1]:port" -> "::1"
+        if r.startswith("["):
+            r = r[1:].split("]")[0]
+        elif r.count(":") == 1:
+            # 仅一个冒号 = IPv4 host:port 或 host（无端口）
+            r = r.split(":")[0]
+        # 多个冒号（裸 IPv6，如 "::1"）保持原样，不再切
+        is_loopback = r in ("127.0.0.1", "::1", "localhost") or r.startswith("127.")
+        if self._token:
+            if token == self._token:
+                return True
+            return is_loopback
+        return is_loopback
+
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         """接受 QQ 框架连接（鉴权：无 token 仅本地回路）"""
         ws = web.WebSocketResponse(heartbeat=30)
@@ -123,26 +147,14 @@ class OneBotWSServerAdapter(BasePlatformAdapter):
         # 鉴权：Authorization: Bearer token 或 access_token 查询参数
         auth = request.headers.get("Authorization", "")
         token = auth.replace("Bearer ", "").strip() if auth else request.query.get("access_token", "")
-
-        # 本地回路检查：无 token（或 token 不匹配）时仅允许本地连接
-        remote = (request.remote or "").split(":")[0]
-        is_loopback = remote in ("127.0.0.1", "::1", "localhost") or remote.startswith("127.")
-
-        if self._token:
-            if token == self._token:
-                logger.info(f"OneBotWSServer: 客户端鉴权通过 ({remote})")
-            elif is_loopback:
-                logger.info(f"OneBotWSServer: 本地回路无 token 连接放行 ({remote})")
-            else:
+        if not self._authorize(request.remote, token):
+            if self._token:
                 logger.warning(f"OneBotWSServer: 鉴权失败（非本地且无有效 token），拒绝 ({request.remote})")
                 await ws.close(code=4401, message=b"Unauthorized")
-                return ws
-        else:
-            # 未配置 token：仅允许本地回路连接
-            if not is_loopback:
+            else:
                 logger.warning(f"OneBotWSServer: 未配置 token，拒绝非本地连接 ({request.remote})")
                 await ws.close(code=4401, message=b"Forbidden")
-                return ws
+            return ws
 
         client_id = id(ws)
         self._clients[client_id] = ws
@@ -177,11 +189,19 @@ class OneBotWSServerAdapter(BasePlatformAdapter):
 
     # ==================== 消息处理 ====================
 
-    async def _handle_message_event(self, evt: dict) -> None:
+    def _in_whitelist(self, evt: dict) -> bool:
+        """白名单群过滤：群消息在白名单内才处理；空名单=全部放行；私聊不拦。"""
         msg_type = evt.get("message_type", "")
         group_id = str(evt.get("group_id", ""))
         if self._allowed_groups and msg_type == "group" and group_id not in self._allowed_groups:
             logger.debug(f"Ignore message from non-whitelisted group: {group_id}")
+            return False
+        return True
+
+    async def _handle_message_event(self, evt: dict) -> None:
+        msg_type = evt.get("message_type", "")
+        group_id = str(evt.get("group_id", ""))
+        if not self._in_whitelist(evt):
             return
 
         content = self._extract_text(evt.get("message", evt.get("raw_message", "")))
