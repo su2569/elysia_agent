@@ -352,10 +352,19 @@ class OneBotWSAdapter(BasePlatformAdapter):
         hist.append(now)
         if len(hist) >= self._repeat_count:
             return True
-        # 清理其它 key 防止内存膨胀
+        # 清理其它 key 防止内存膨胀（上限 5000）
+        # 只删过期条目不够——若攻击者用大量不同的新消息刷屏，全部都在窗口内，
+        # 字典会无限增长。因此超限时先淘汰最久未活动的 key。
         if len(self._repeat_history) > 5000:
-            self._repeat_history = {k: v for k, v in self._repeat_history.items()
-                                    if v and now - v[-1] <= self._repeat_window_sec}
+            # 1) 先丢弃过期条目
+            live = {k: v for k, v in self._repeat_history.items()
+                    if v and now - v[-1] <= self._repeat_window_sec}
+            # 2) 仍超限则按最近一次活动时间淘汰最旧的
+            if len(live) > 5000:
+                ordered = sorted(live.items(), key=lambda kv: kv[1][-1])
+                self._repeat_history = dict(ordered[-(5000 - 1):])  # 留 4999 + 当前 key
+            else:
+                self._repeat_history = live
         return False
 
     # ==================== 发送 ====================
