@@ -43,7 +43,7 @@ class ChatDBMemory(IMemoryService):
         """发送JSON-RPC请求"""
         payload = {
             "jsonrpc": "2.0",
-            "id": asyncio.get_event_loop().time(),
+            "id": asyncio.get_running_loop().time(),
             "method": method,
             "params": params
         }
@@ -77,7 +77,8 @@ class ChatDBMemory(IMemoryService):
                 "query": f"profile:{user_id}",
                 "limit": 1
             })
-            result["profile"] = profile[0]["content"] if profile else ""
+            first = profile[0] if isinstance(profile, list) and profile else None
+            result["profile"] = first.get("content", "") if isinstance(first, dict) else ""
 
         # 近期对话
         if include_recent:
@@ -123,7 +124,8 @@ class ChatDBMemory(IMemoryService):
         tags: Optional[List[str]] = None
     ) -> None:
         """存储记忆"""
-        tags = tags or []
+        # 不能直接对入参 list 追加：调用方的列表会被逐次污染（每存一次多一个 memory_type）
+        tags = list(tags) if tags else []
         tags.append(memory_type)
 
         if memory_type == "passive":

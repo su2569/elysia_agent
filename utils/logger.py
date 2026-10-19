@@ -132,12 +132,20 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     """配置全局彩色日志
 
     Args:
-        level: DEBUG/INFO/WARNING/ERROR
+        level: DEBUG/INFO/WARNING/ERROR（大小写不敏感；None/非法值/整数均安全回落）
         log_file: 日志文件路径（纯文本，无 ANSI 码）
     """
     init_color()
     root = logging.getLogger()
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # level 可能是 None / int / 非法字符串：直接 .upper() 会抛 AttributeError，
+    # 而这段在启动最早期执行，一旦抛出就是整个进程起不来。
+    if isinstance(level, int):
+        root_level = level if level in _LEVEL_STYLES else logging.INFO
+    elif isinstance(level, str) and level.strip():
+        root_level = getattr(logging, level.strip().upper(), logging.INFO)
+    else:
+        root_level = logging.INFO
+    root.setLevel(root_level)
     # 清理旧 handler（避免重复）
     for h in list(root.handlers):
         root.removeHandler(h)
