@@ -34,6 +34,27 @@ REPORT_FILE = "crash_report.json"
 # 第二次崩溃直接持久化禁用模块。
 MAX_AUTO_RELOAD = 2
 
+CRASH_LIMIT_DEFAULT = 20
+CRASH_LIMIT_MAX = 1000
+
+
+def _coerce_crash_limit(value) -> int:
+    """把外部传入的 limit 夹取到 [1, CRASH_LIMIT_MAX]。
+
+    非数值、None、NaN、inf 一律回落 CRASH_LIMIT_DEFAULT。
+    必须显式夹取：0 在切片里是「全量」，负数在切片里是「跳过前 N 条」，
+    两者都不是「取最近 N 条」的本意。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return CRASH_LIMIT_DEFAULT
+    if n < 1:
+        return 1
+    if n > CRASH_LIMIT_MAX:
+        return CRASH_LIMIT_MAX
+    return n
+
 
 @dataclass
 class CrashRecord:
@@ -239,7 +260,14 @@ class ModuleRecovery:
     # ==================== 查询 ====================
 
     def get_crash_report(self, limit: int = 20) -> Dict[str, Any]:
-        """崩溃报告（模块/位置/异常）"""
+        """崩溃报告（模块/位置/异常）
+
+        limit 必须夹取。原实现直接 self._crashes[-limit:]：
+          limit=0  -> [-0:] 等于全量，一次吐出所有崩溃记录
+          limit=-3 -> 变成「跳过前 3 条」，返回的既不是最近 3 条也不是全部
+        Python 里 -0 == 0，切片对 0 和负数的语义都不是「取最近 N 条」。
+        """
+        limit = _coerce_crash_limit(limit)
         return {
             "total": len(self._crashes),
             "disabled_modules": sorted(self._disabled),
