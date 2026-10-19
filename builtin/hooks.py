@@ -27,7 +27,7 @@ async def auto_inject_history(ctx, **kwargs):
 
     # 检查是否为新会话（step_count == 0 且没有历史）
     if ctx.step_count == 0 and not ctx.injected_pre.get("_history_injected"):
-        history_context = memory.get_new_session_context(
+        history_context = await memory.get_new_session_context(
             days_important=3,
             days_summary=7
         )
@@ -52,14 +52,14 @@ async def auto_recall_on_chat(ctx, **kwargs):
         return
 
     # 自动回忆相关记忆
-    recall_results = memory.auto_recall(ctx.query, top_k=3)
+    recall_results = await memory.auto_recall(ctx.query, top_k=3)
 
     if recall_results:
         # 将回忆结果注入上下文
         ctx.injected_pre["auto_recall"] = recall_results
 
         # 同时检索记忆节点
-        nodes = memory.recall_nodes(ctx.query, limit=3)
+        nodes = await memory.recall_nodes(ctx.query, limit=3)
         if nodes:
             ctx.injected_pre["recalled_nodes"] = [
                 {"name": n.name, "type": n.node_type, "desc": n.description[:50]}
@@ -89,7 +89,7 @@ async def extract_nodes_from_conversation(ctx, **kwargs):
     name_match = re.search(r"我[是叫]([\u4e00-\u9fa5]{2,8})", full_text)
     if name_match:
         name = name_match.group(1)
-        memory.create_node(
+        await memory.create_node(
             name=name,
             node_type="person",
             description=f"用户提到自己是{name}",
@@ -98,10 +98,20 @@ async def extract_nodes_from_conversation(ctx, **kwargs):
         logger.info(f"Auto-extracted person node: {name}")
 
     # 提取地点
-    place_match = re.search(r"在([\u4e00-\u9fa5]{2,10})(?:市|省|县|区|镇|村)?", full_text)
+    # 优先匹配带行政区后缀的地名：捕获组只取主体，后缀放组外。
+    # 必须用非贪婪，否则 {2,10} 会先吃满 "杭州市工作"，后缀永远匹配空。
+    place_match = re.search(
+        r"在([\u4e00-\u9fa5]{2,6}?)(?:市|省|县|区|镇|村)", full_text
+    )
+    if not place_match:
+        # 无后缀兜底：限定 2-4 字，且后面必须跟动作词或句末，避免吃掉整句
+        place_match = re.search(
+            r"在([\u4e00-\u9fa5]{2,4})(?=工作|生活|居住|住|上学|读书|出差|旅游|出生|$)",
+            full_text,
+        )
     if place_match:
         place = place_match.group(1)
-        memory.create_node(
+        await memory.create_node(
             name=place,
             node_type="place",
             description=f"提到的地点",
