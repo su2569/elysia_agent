@@ -1,4 +1,5 @@
 """Discord Bot 适配器"""
+import asyncio
 from typing import Dict, Any, Optional
 
 from .message import BotMessage
@@ -134,6 +135,9 @@ class DiscordBotAdapter(BasePlatformAdapter):
     def _parse_discord_message(self, discord_msg) -> Optional[BotMessage]:
         """解析 Discord 消息为统一格式"""
         import time
+        # discord 在 start() 里是局部导入，本函数每条消息都会走到，
+        # 必须自己再导一次，否则 isinstance(..., discord.DMChannel) 抛 NameError。
+        import discord
         author = discord_msg.author
         content = discord_msg.content.strip()
 

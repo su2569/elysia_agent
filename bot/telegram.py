@@ -1,4 +1,5 @@
 """Telegram Bot 适配器"""
+import asyncio
 import re
 import time
 from typing import Dict, Any, Optional, List
