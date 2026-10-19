@@ -80,7 +80,12 @@ class BotMessage:
 
     @property
     def is_command(self) -> bool:
-        """是否为命令消息"""
+        """是否为命令消息
+
+        注：MessageFormat 没有 COMMAND 成员，`content_type` 不可能等于
+        MessageType.COMMAND，因此这里实质只按 prefix 判定。曾误判为
+        "跨枚举比较恒假"的缺陷，反向验证证明改动前后行为一致，已撤回。
+        """
         return self.prefix in ("/", "!", "#") or self.content_type == MessageType.COMMAND
 
     @property
@@ -94,7 +99,7 @@ class BotMessage:
     @property
     def command_args(self) -> str:
         """提取命令参数"""
-        if not self.is_command or not self.is_command:
+        if not self.is_command:
             return ""
         parts = self.content.strip().split(None, 1)
         return parts[1] if len(parts) > 1 else ""

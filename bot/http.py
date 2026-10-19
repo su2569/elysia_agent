@@ -133,9 +133,18 @@ class HTTPWebhookAdapter(BasePlatformAdapter):
 
         try:
             data = await request.json()
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            # 非法 JSON / 非法 UTF-8 字节 / 空 body 都归为请求格式错误
             return web.json_response(
                 {"error": "Invalid JSON"},
+                status=400
+            )
+
+        # JSON 合法但顶层不是对象（数组/数字/字符串）时，后续 .get() 会抛
+        # AttributeError 直接 500。这里是外部可达入口，必须先校验形状。
+        if not isinstance(data, dict):
+            return web.json_response(
+                {"error": "Invalid payload: expected JSON object"},
                 status=400
             )
 
