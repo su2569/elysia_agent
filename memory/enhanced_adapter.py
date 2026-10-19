@@ -128,6 +128,19 @@ class EnhancedMemory(IMemoryService):
     async def health_check(self) -> bool:
         return await self.base_memory.health_check()
 
+    async def close(self) -> None:
+        """关闭底层持久连接。
+
+        base_memory（SQLiteMemory）持有 aiosqlite 的持久连接，其工作线程是
+        独立线程。若不显式关闭，线程会在事件循环关闭后继续投递结果，导致
+        `RuntimeError: Event loop is closed`。node_manager 用的是每次调用
+        短连接（async with aiosqlite.connect），无需关闭。
+        """
+        try:
+            await self.base_memory.close()
+        except Exception as e:
+            logger.warning(f"EnhancedMemory close failed: {e}")
+
     # ===== APLR 扩展方法（全部改为 async） =====
 
     async def create_node(self, name: str, node_type: str, description: str, **kwargs) -> MemoryNode:
