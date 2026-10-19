@@ -86,4 +86,11 @@ def get_events(limit: int = 50, severity: Optional[str] = None) -> List[Dict[str
         items = list(_inmem)
     if severity:
         items = [e for e in items if e.severity == severity]
+    # limit<=0 必须返回空列表：items[-0:] 等价于 items[0:]，会把整个缓冲吐出去。
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    if limit <= 0:
+        return []
     return [e.to_dict() for e in items[-limit:]]

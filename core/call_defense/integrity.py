@@ -19,6 +19,9 @@ _MONITORED = [
     "integrity.py",
     "audit.py",
     "daemon.py",
+    # override.py 决定"谁能关掉防御"。不纳入监控的话，
+    # 把它改成 _require_owner 恒真，integrity_status() 仍会报 ok。
+    "override.py",
 ]
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
