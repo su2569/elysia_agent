@@ -73,12 +73,18 @@ def check_command_access(role, required_grade) -> Tuple[bool, str]:
 
 
 def describe(required_grade) -> str:
-    """命令描述尾部追加所需等级（用于 /help 展示）"""
-    g = CommandGrade(grade_from_role(required_grade)) if grade_from_role(required_grade) in CommandGrade._value2member_map_ else CommandGrade.USER
+    """命令描述尾部追加所需等级（用于 /help 展示）
+
+    未知档位不回落成「普通」：/help 是用户判断能不能跑某条命令的唯一依据，
+    把 grade=5 显示成（普通）会让人以为普通账号可用，实际一律被拒。
+    """
+    value = grade_from_role(required_grade)
     label = {
-        CommandGrade.GUEST: "游客",
-        CommandGrade.USER: "普通",
-        CommandGrade.ADMIN: "管理员",
-        CommandGrade.OWNER: "所有者",
-    }.get(g, "普通")
+        0: "游客",
+        1: "普通",
+        2: "管理员",
+        3: "所有者",
+    }.get(value)
+    if label is None:
+        return f"（等级{value}）"
     return f"（{label}）"
