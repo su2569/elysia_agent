@@ -24,14 +24,27 @@ from .override import override_status  # 阶段四：心跳上报 + 豁免超时
 class CallDefenseDaemon:
     """调用防御守护进程（线程模式，可在主进程内作为守护线程运行）。"""
 
+    # 扫描间隔下限（秒）。0 或负数会让 Event.wait() 立即返回，形成忙循环，
+    # 实测 0.3 秒内可空转十几万次，直接吃满一个核心。
+    MIN_INTERVAL = 0.5
+
     def __init__(self, interval: float = 10.0, main_pid: Optional[int] = None):
-        self.interval = interval
+        try:
+            iv = float(interval)
+        except (TypeError, ValueError):
+            iv = 10.0
+        # 非有限值（nan/inf）与越界值一律回落，避免 wait() 行为不可预期
+        if iv != iv or iv in (float("inf"), float("-inf")):
+            iv = 10.0
+        self.interval = max(self.MIN_INTERVAL, iv)
         self.main_pid = main_pid if main_pid is not None else os.getpid()
         self.running = False
         self.pid = os.getpid()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.last_scan: Dict[str, Any] = {}
+        # 连续扫描异常计数，用于日志降噪（不因偶发异常刷屏）
+        self._error_streak = 0
 
     def start(self) -> bool:
         if self.running:
@@ -51,8 +64,25 @@ class CallDefenseDaemon:
             self._thread.join(timeout=3)
 
     def _loop(self) -> None:
+        """扫描主循环。
+
+        单轮扫描抛异常不能终止守护线程：防御层静默死掉比崩溃更危险，
+        因为它对外仍报告 running=True。异常记录后继续下一轮。
+        """
         while not self._stop.is_set():
-            self.scan_once()
+            try:
+                self.scan_once()
+                self._error_streak = 0
+            except Exception as exc:  # noqa: BLE001 - 守护线程必须自愈
+                self._error_streak += 1
+                try:
+                    log_event(
+                        EventSeverity.WARN, "daemon",
+                        "守护扫描异常，已跳过本轮",
+                        detail={"error": repr(exc), "streak": self._error_streak},
+                    )
+                except Exception:
+                    pass
             self._stop.wait(self.interval)
 
     def scan_once(self) -> Dict[str, Any]:
