@@ -3,7 +3,11 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 import os
 import json
+import logging
 import yaml
+
+
+logger = logging.getLogger("elysia.config")
 
 
 @dataclass
@@ -444,9 +448,16 @@ class Settings:
         settings = cls()
 
         # 基础字段
-        settings.debug = data.get("debug", settings.debug)
-        settings.plugins_dir = data.get("plugins_dir", settings.plugins_dir)
-        settings.data_dir = data.get("data_dir", settings.data_dir)
+        # 基础字段同样要走类型校正：直接 data.get() 会让 "debug": "true"
+        # 原样存成字符串（truthy），"plugins_dir": 123 也会一路带到下游。
+        if "debug" in data:
+            settings.debug = _coerce_field_value(settings.debug, data["debug"], "debug")
+        if "plugins_dir" in data:
+            settings.plugins_dir = _coerce_field_value(
+                settings.plugins_dir, data["plugins_dir"], "plugins_dir")
+        if "data_dir" in data:
+            settings.data_dir = _coerce_field_value(
+                settings.data_dir, data["data_dir"], "data_dir")
 
         # 子配置
         if "memory" in data:
@@ -591,15 +602,35 @@ class Settings:
                 if key is None:
                     # 直接设置顶层属性
                     if section == "debug":
-                        setattr(self, section, val.lower() in ("true", "1", "yes"))
+                        setattr(self, section, _coerce_bool(val))
                 else:
                     current = getattr(section_obj, key)
                     if isinstance(current, bool):
-                        setattr(section_obj, key, val.lower() in ("true", "1", "yes"))
+                        setattr(section_obj, key, _coerce_bool(val))
                     elif isinstance(current, int):
-                        setattr(section_obj, key, int(val))
+                        # 注意：环境变量来自外部，格式完全不可信。
+                        # 早前直接 int(val)，`ELYSIA_SERVER_PORT=abc` 会让
+                        # Settings.from_file 抛 ValueError，进程在「加载配置」
+                        # 阶段就崩掉——连日志都还没初始化，用户看不到任何原因。
+                        _iv = _coerce_int(val)
+                        if _iv is None:
+                            logger.warning(
+                                "环境变量 %s=%r 不是合法整数，已忽略，保留 %s.%s=%r",
+                                env_key, val, section, key, current)
+                        elif key == "port" and not (1 <= _iv <= 65535):
+                            logger.warning(
+                                "环境变量 %s=%r 超出端口范围 1-65535，已忽略，保留 %s.%s=%r",
+                                env_key, val, section, key, current)
+                        else:
+                            setattr(section_obj, key, _iv)
                     elif isinstance(current, float):
-                        setattr(section_obj, key, float(val))
+                        _fv = _coerce_float(val)
+                        if _fv is None:
+                            logger.warning(
+                                "环境变量 %s=%r 不是合法浮点数，已忽略，保留 %s.%s=%r",
+                                env_key, val, section, key, current)
+                        else:
+                            setattr(section_obj, key, _fv)
                     else:
                         setattr(section_obj, key, val)
 
@@ -630,19 +661,110 @@ class Settings:
         return asdict(self)
 
 
-def _dict_to_dataclass(instance, updates: Dict[str, Any]):
+def _coerce_field_value(current, value, label: str = ""):
+    """按字段当前值的类型，把配置里的原始值校正成该类型。
+
+    背景：`_dict_to_dataclass` 原来只判断「是不是嵌套 dataclass」，
+    标量一律原样 setattr。于是 `"memory": {"enabled": "false"}` 会存成
+    字符串 `"false"`——它是 truthy，记忆功能被反着执行，且不报错、不打日志。
+    `tool.max_steps: "20"` 更直接，`validate()` 里 `< 1` 当场抛 TypeError。
+
+    配置文件是手写的，类型写错太常见。这里统一按「目标字段的真实类型」转换：
+      - 转换失败 → 保留原值并记一条 WARNING，绝不让加载阶段抛异常
+      - 目标值为 None（Optional 字段）→ 无从判断类型，原样放行
+    """
+    if current is None:
+        return value
+
+    # bool 必须排在 int 之前：isinstance(True, int) 为 True
+    if isinstance(current, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                return True
+            if s in ("false", "0", "no", "off", ""):
+                return False
+        logger.warning("配置项 %s 期望 bool，收到 %r，已保留原值 %r", label, value, current)
+        return current
+
+    if isinstance(current, int):
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        iv = _coerce_int(value)
+        if iv is None:
+            logger.warning("配置项 %s 期望 int，收到 %r，已保留原值 %r", label, value, current)
+            return current
+        return iv
+
+    if isinstance(current, float):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        fv = _coerce_float(value)
+        if fv is None:
+            logger.warning("配置项 %s 期望 float，收到 %r，已保留原值 %r", label, value, current)
+            return current
+        return fv
+
+    if isinstance(current, str):
+        # str 字段原样放行：把数字 20 强行转成 "20" 反而会丢信息
+        # （log.level 写数字时 setup_logging 认 int，转成字符串就退化成 INFO 了）。
+        # 下游消费方对非字符串都已做了容错，这里不做二次加工。
+        return value
+
+    return value
+
+
+def _dict_to_dataclass(instance, updates: Dict[str, Any], _prefix: str = ""):
     """辅助函数：用字典更新 dataclass 实例（支持嵌套）"""
     from dataclasses import is_dataclass
     for key, value in updates.items():
         if not hasattr(instance, key):
             continue
         current = getattr(instance, key)
+        label = f"{_prefix}{key}"
         if is_dataclass(current) and not isinstance(current, type) and isinstance(value, dict):
-            _dict_to_dataclass(current, value)
+            _dict_to_dataclass(current, value, _prefix=f"{label}.")
         elif isinstance(current, (list, tuple)) and isinstance(value, list):
             setattr(instance, key, value)
         elif isinstance(current, dict) and isinstance(value, dict):
             setattr(instance, key, {**current, **value})
         else:
-            setattr(instance, key, value)
+            setattr(instance, key, _coerce_field_value(current, value, label))
     return instance
+
+
+def _coerce_bool(value) -> bool:
+    """环境变量转 bool：只认 true/1/yes/on，其余为 False（保持原有语义）。"""
+    try:
+        return str(value).strip().lower() in ("true", "1", "yes", "on")
+    except Exception:
+        return False
+
+
+def _coerce_int(value):
+    """环境变量转 int：失败返回 None（调用方保留原值）。
+
+    环境变量是外部输入，可能为空串、带空格、写成 "8080.0" 或纯手误。
+    任何情况都不能让配置加载抛异常——那会让进程起不来且无从排查。
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+
+
+def _coerce_float(value):
+    """环境变量转 float：失败返回 None。"""
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
