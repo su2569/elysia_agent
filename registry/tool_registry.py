@@ -240,8 +240,13 @@ class ToolRegistry:
                 reg._disabled[name] = True
 
     @classmethod
-    def _save_persisted_states(cls) -> None:
-        """原子写启停状态。写失败不抛异常，只保留内存态。"""
+    def _save_persisted_states(cls) -> bool:
+        """原子写启停状态。返回是否真的写成功。
+
+        写失败**不再静默吞掉**：调用方（如 api_tools_manage）必须知道结果，
+        否则会出现「接口回成功、内存已改、重启后却回到原样」的谎报。
+        内存态仍然保留，调用方决定是否回滚。
+        """
         import os as _os, json as _json, tempfile as _tf
         path = cls._states_path()
         try:
@@ -261,20 +266,33 @@ class ToolRegistry:
                 except Exception:
                     pass
                 raise
+            return True
         except Exception:
-            pass
+            return False
 
     @classmethod
-    def set_enabled(cls, name: str, enabled: bool) -> None:
-        """设置工具/命令启停状态并落盘"""
-        # 先读回已有状态，否则本次写盘会把磁盘上其它禁用项一起抹掉
+    def set_enabled(cls, name: str, enabled: bool) -> bool:
+        """设置工具/命令启停状态并落盘。返回是否写盘成功。
+
+        先读回已有状态，否则本次写盘会把磁盘上其它禁用项一起抹掉。
+        写盘失败时**回滚内存态**，保证内存与磁盘一致——宁可这次没生效，
+        也不要「当场看起来生效、重启后静默回滚」。
+        """
         cls._load_persisted_states()
         reg = cls._get_default()
+        prev_disabled = reg._disabled.get(name)
         if enabled:
             reg._disabled.pop(name, None)
         else:
             reg._disabled[name] = True
-        cls._save_persisted_states()
+        if cls._save_persisted_states():
+            return True
+        # 写盘失败：还原内存态
+        if prev_disabled:
+            reg._disabled[name] = prev_disabled
+        else:
+            reg._disabled.pop(name, None)
+        return False
 
     @classmethod
     def is_enabled(cls, name: str) -> bool:
