@@ -169,9 +169,13 @@ class ToolRegistry:
                 pass
 
     @classmethod
-    def _save_persisted_commands(cls) -> None:
+    def _save_persisted_commands(cls) -> bool:
         """持久化用户命令：先读回磁盘已有命令再合并内存态，避免重启后
-        全量覆盖把先前注册的自定义命令抹掉。原子写（临时文件+os.replace）。"""
+        全量覆盖把先前注册的自定义命令抹掉。原子写（临时文件+os.replace）。
+
+        返回是否真的写盘成功。调用方必须检查返回值——写盘失败时内存里
+        的命令仍然可用，但重启后会消失，静默吞掉会让用户以为保存成功。
+        """
         import os as _os, json as _json, tempfile as _tf
         path = cls._commands_path()
         try:
@@ -188,8 +192,10 @@ class ToolRegistry:
             merged.update(cls._get_default()._commands)
             fd, tmp = _tf.mkstemp(dir=_os.path.dirname(path), suffix=".tmp")
             try:
-                with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                with _os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
                     _json.dump(merged, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    _os.fsync(f.fileno())
                 _os.replace(tmp, path)
             finally:
                 if _os.path.exists(tmp):
@@ -197,8 +203,14 @@ class ToolRegistry:
                         _os.remove(tmp)
                     except Exception:
                         pass
-        except Exception:
-            pass
+            return True
+        except Exception as e:
+            try:
+                import logging as _lg
+                _lg.getLogger(__name__).error(f"用户命令写入失败（磁盘未改动）: {e}")
+            except Exception:
+                pass
+            return False
 
     # 工具/命令启停状态持久化（data/tool_states.json）
 
@@ -335,10 +347,14 @@ class ToolRegistry:
 
     @classmethod
     def register_command(cls, name: str, description: str, content: str,
-                         source: str = "user") -> None:
-        """注册用户命令（AI 可搜索并使用，持久化到 data/user_commands.json）"""
+                         source: str = "user") -> bool:
+        """注册用户命令（AI 可搜索并使用，持久化到 data/user_commands.json）。
+
+        返回是否成功写盘。写盘失败时内存态保留（本次运行内仍可用），
+        但调用方应如实上报失败——否则重启后命令会静默消失。
+        """
         cls._get_default().register_command_instance(name, description, content, source)
-        cls._save_persisted_commands()
+        return cls._save_persisted_commands()
 
     @classmethod
     def get_command(cls, name: str) -> Optional[Dict[str, Any]]:
