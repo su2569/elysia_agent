@@ -163,17 +163,32 @@ class PluginManager:
         except Exception as e:
             logger.warning(f"Failed to load plugin state: {e}")
 
-    def _save_persisted_state(self) -> None:
-        """保存插件状态到磁盘"""
+    def _save_persisted_state(self) -> bool:
+        """保存插件状态到磁盘。
+
+        Returns:
+            True=已落盘；False=写盘失败（调用方必须据此回滚内存态并如实上报，
+            否则会出现「接口说成功、重启后状态消失」）。
+        """
         try:
             from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
-            Path(self.state_file).write_text(
+            tmp = self.state_file + ".tmp"
+            Path(tmp).write_text(
                 json.dumps(self._persisted, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            os.replace(tmp, self.state_file)
+            return True
         except Exception as e:
-            logger.warning(f"Failed to save plugin state: {e}")
+            logger.error(f"Failed to save plugin state: {e}")
+            # 清理可能残留的半截临时文件，避免下次读到损坏内容
+            try:
+                if os.path.exists(self.state_file + ".tmp"):
+                    os.remove(self.state_file + ".tmp")
+            except Exception:
+                pass
+            return False
 
     def _swap_dir(self) -> str:
         from ..utils.paths import safe_join
@@ -187,10 +202,13 @@ class PluginManager:
             safe = "unnamed"
         return safe_join(self._swap_dir(), f"{safe}.json")
 
-    def _save_swap_snapshot(self, info: PluginInfo) -> None:
-        """保存插件 SWAP 快照（元信息 + 配置）"""
+    def _save_swap_snapshot(self, info: PluginInfo) -> bool:
+        """保存插件 SWAP 快照（元信息 + 配置）。
+
+        Returns:
+            True=快照已落盘；False=写盘失败（swap 应据此回滚）。
+        """
         from pathlib import Path
-        os.makedirs(self._swap_dir(), exist_ok=True)
         snapshot = {
             "name": info.name,
             "version": info.version,
@@ -201,10 +219,19 @@ class PluginManager:
             "plugin_dir": info.plugin_dir,
             "kind": info.kind,
         }
-        Path(self._swap_file(info.name)).write_text(
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            os.makedirs(self._swap_dir(), exist_ok=True)
+            target = self._swap_file(info.name)
+            tmp = target + ".tmp"
+            Path(tmp).write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, target)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save swap snapshot for {info.name}: {e}")
+            return False
 
     def _load_swap_snapshot(self, name: str) -> Optional[PluginInfo]:
         """读取插件 SWAP 快照"""
@@ -463,10 +490,16 @@ class PluginManager:
     # ==================== 启用/禁用 ====================
 
     async def enable(self, name: str) -> bool:
-        """启用插件：从持久化 disabled 列表移除（下次启动会加载）"""
+        """启用插件：从持久化 disabled 列表移除（下次启动会加载）。
+
+        写盘失败时回滚内存态并返回 False——否则「当场启用、重启后仍被禁用」。
+        """
         if name in self._persisted["disabled"]:
             self._persisted["disabled"].remove(name)
-            self._save_persisted_state()
+            if not self._save_persisted_state():
+                self._persisted["disabled"].append(name)  # 回滚
+                logger.error(f"启用插件 {name} 落盘失败，已回滚（重启后仍为禁用）")
+                return False
         plugin = self._plugins.get(name)
         if plugin:
             plugin.info.enabled = True
@@ -484,9 +517,17 @@ class PluginManager:
         await plugin.on_disable()
         if name not in self._persisted["disabled"]:
             self._persisted["disabled"].append(name)
-        if name in self._persisted["swapped"]:
+        was_swapped = name in self._persisted["swapped"]
+        if was_swapped:
             self._persisted["swapped"].remove(name)
-        self._save_persisted_state()
+        if not self._save_persisted_state():
+            # 回滚持久化态（内存已停用，但下次启动必须仍然是停用，否则谎报）
+            if name in self._persisted["disabled"]:
+                self._persisted["disabled"].remove(name)
+            if was_swapped:
+                self._persisted["swapped"].append(name)
+            logger.error(f"禁用插件 {name} 落盘失败，已回滚（重启后仍会加载）")
+            return False
         logger.info(f"Plugin {name} disabled (will not load on next start)")
         return True
 
@@ -515,9 +556,16 @@ class PluginManager:
             # 持久化：下次启动不加载
             if name not in self._persisted["disabled"]:
                 self._persisted["disabled"].append(name)
-            if name in self._persisted["swapped"]:
+            was_swapped = name in self._persisted["swapped"]
+            if was_swapped:
                 self._persisted["swapped"].remove(name)
-            self._save_persisted_state()
+            if not self._save_persisted_state():
+                if name in self._persisted["disabled"]:
+                    self._persisted["disabled"].remove(name)
+                if was_swapped:
+                    self._persisted["swapped"].append(name)
+                logger.error(f"卸载插件 {name} 落盘失败，已回滚持久化态（重启后仍会加载）")
+                return False
             logger.info(f"Plugin {name} unloaded (will not load on next start)")
         else:
             logger.info(f"Plugin {name} unloaded (memory only)")
@@ -539,15 +587,25 @@ class PluginManager:
         except Exception as e:
             logger.warning(f"on_swap error for {name}: {e}")
         info = self._infos.pop(name, None)
+        snapshot_ok = True
         if info is not None:
-            self._save_swap_snapshot(info)
+            snapshot_ok = self._save_swap_snapshot(info)
         self._states[name] = PluginState.SWAPPED
         self._unregister_prompt_segments(name)
+        was_disabled = name in self._persisted["disabled"]
         if name not in self._persisted["swapped"]:
             self._persisted["swapped"].append(name)
-        if name in self._persisted["disabled"]:
+        if was_disabled:
             self._persisted["disabled"].remove(name)
-        self._save_persisted_state()
+        # 快照或状态任一落盘失败 → 回滚持久化态并如实返回 False，
+        # 否则重启后既不在 swapped 也不在 disabled，插件会被当成「正常」重新加载。
+        if not snapshot_ok or not self._save_persisted_state():
+            if name in self._persisted["swapped"]:
+                self._persisted["swapped"].remove(name)
+            if was_disabled and name not in self._persisted["disabled"]:
+                self._persisted["disabled"].append(name)
+            logger.error(f"转移插件 {name} 至 SWAP 落盘失败，已回滚（重启后按原状态加载）")
+            return False
         logger.info(f"Plugin {name} swapped out (memory released, restore to bring back)")
         return True
 
@@ -567,8 +625,16 @@ class PluginManager:
             return False
         try:
             await self._load_single(info)
-            self._persisted["swapped"].remove(name)
-            self._save_persisted_state()
+            was_swapped = name in self._persisted["swapped"]
+            if was_swapped:
+                self._persisted["swapped"].remove(name)
+            if not self._save_persisted_state():
+                # 插件已进内存，但持久化仍记着 swapped → 重启后会再恢复一次，不致命；
+                # 但必须如实上报，让上层知道状态未落盘。
+                if was_swapped and name not in self._persisted["swapped"]:
+                    self._persisted["swapped"].append(name)
+                logger.error(f"恢复插件 {name} 落盘失败，状态未持久化")
+                return False
             logger.info(f"Plugin {name} restored from SWAP")
             return True
         except Exception as e:
