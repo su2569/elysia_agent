@@ -18,6 +18,8 @@ class ToolRegistry:
     """工具注册中心"""
 
     _default_instance: Optional["ToolRegistry"] = None
+    # 启停状态是否已从磁盘读回（只读一次，避免工具热路径反复读盘）
+    _states_loaded: bool = False
 
     def __init__(self):
         self._tools: Dict[str, ITool] = {}
@@ -25,6 +27,9 @@ class ToolRegistry:
         self._commands: Dict[str, Dict[str, Any]] = {}
         # 工具调用统计：{"工具名": count}
         self._usage: Dict[str, int] = {}
+        # 启停状态：{"工具名或命令名": True=禁用}
+        # 由 /api/v1/tools/manage 写入，供 get/list/search 统一过滤
+        self._disabled: Dict[str, bool] = {}
 
     # ---------- 实例方法 ----------
 
@@ -33,7 +38,9 @@ class ToolRegistry:
         self._tools[tool.name] = tool
 
     def get_instance(self, name: str) -> Optional[ITool]:
-        """从当前实例获取工具"""
+        """从当前实例获取工具（已禁用的视为不存在）"""
+        if self._disabled.get(name):
+            return None
         return self._tools.get(name)
 
     def unregister_instance(self, name: str) -> bool:
@@ -44,8 +51,8 @@ class ToolRegistry:
         return False
 
     def list_instance(self) -> Dict[str, ITool]:
-        """列出当前实例的所有工具"""
-        return dict(self._tools)
+        """列出当前实例的所有工具（不含已禁用的）"""
+        return {n: t for n, t in self._tools.items() if not self._disabled.get(n)}
 
     def clear_instance(self) -> None:
         """清空当前实例"""
@@ -64,10 +71,12 @@ class ToolRegistry:
         }
 
     def get_command_instance(self, name: str) -> Optional[Dict[str, Any]]:
+        if self._disabled.get(name):
+            return None
         return self._commands.get(name)
 
     def list_commands_instance(self) -> Dict[str, Dict[str, Any]]:
-        return dict(self._commands)
+        return {n: c for n, c in self._commands.items() if not self._disabled.get(n)}
 
     def search_instance(self, query: str, limit: int = 10,
                         include_commands: bool = True) -> List[Dict[str, Any]]:
@@ -76,6 +85,8 @@ class ToolRegistry:
         results: List[Dict[str, Any]] = []
 
         for name, tool in self._tools.items():
+            if self._disabled.get(name):
+                continue
             desc = getattr(tool, "description", "") or ""
             haystack = f"{name} {desc}".lower()
             if q in haystack:
@@ -88,6 +99,8 @@ class ToolRegistry:
 
         if include_commands:
             for name, cmd in self._commands.items():
+                if self._disabled.get(name):
+                    continue
                 haystack = f"{name} {cmd.get('description', '')} {cmd.get('content', '')}".lower()
                 if q in haystack:
                     results.append({
@@ -158,6 +171,94 @@ class ToolRegistry:
         except Exception:
             pass
 
+    # 工具/命令启停状态持久化（data/tool_states.json）
+
+    @classmethod
+    def _states_path(cls) -> str:
+        from ..utils.paths import safe_join
+        return safe_join("data", "tool_states.json")
+
+    @classmethod
+    def _load_persisted_states(cls, force: bool = False) -> None:
+        """读取启停状态到默认实例。文件缺失或损坏时保持全启用。
+
+        默认只读一次（_states_loaded），避免 get/list/search 这类热路径
+        每次调用都碰磁盘。force=True 可强制重读。
+        """
+        import os as _os, json as _json
+        if cls._states_loaded and not force:
+            return
+        cls._states_loaded = True
+        path = cls._states_path()
+        if not _os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        reg = cls._get_default()
+        for name, item in data.items():
+            if isinstance(item, dict):
+                enabled = bool(item.get("enabled", True))
+            else:
+                enabled = bool(item)
+            if enabled:
+                reg._disabled.pop(name, None)
+            else:
+                reg._disabled[name] = True
+
+    @classmethod
+    def _save_persisted_states(cls) -> None:
+        """原子写启停状态。写失败不抛异常，只保留内存态。"""
+        import os as _os, json as _json, tempfile as _tf
+        path = cls._states_path()
+        try:
+            _os.makedirs(_os.path.dirname(path), exist_ok=True)
+            reg = cls._get_default()
+            payload = {n: {"enabled": False} for n in reg._disabled}
+            fd, tmp = _tf.mkstemp(prefix=".states_", suffix=".tmp", dir=_os.path.dirname(path))
+            try:
+                with _os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                    _json.dump(payload, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    _os.fsync(f.fileno())
+                _os.replace(tmp, path)
+            except Exception:
+                try:
+                    _os.unlink(tmp)
+                except Exception:
+                    pass
+                raise
+        except Exception:
+            pass
+
+    @classmethod
+    def set_enabled(cls, name: str, enabled: bool) -> None:
+        """设置工具/命令启停状态并落盘"""
+        # 先读回已有状态，否则本次写盘会把磁盘上其它禁用项一起抹掉
+        cls._load_persisted_states()
+        reg = cls._get_default()
+        if enabled:
+            reg._disabled.pop(name, None)
+        else:
+            reg._disabled[name] = True
+        cls._save_persisted_states()
+
+    @classmethod
+    def is_enabled(cls, name: str) -> bool:
+        """查询工具/命令是否启用（未知名字默认启用）"""
+        cls._load_persisted_states()
+        return not cls._get_default()._disabled.get(name)
+
+    @classmethod
+    def disabled_names(cls) -> List[str]:
+        """当前被禁用的工具/命令名列表"""
+        cls._load_persisted_states()
+        return list(cls._get_default()._disabled.keys())
+
     @classmethod
     def register(cls, tool: ITool) -> None:
         """注册工具到全局默认注册表"""
@@ -165,7 +266,8 @@ class ToolRegistry:
 
     @classmethod
     def get(cls, name: str) -> Optional[ITool]:
-        """从全局默认注册表获取工具"""
+        """从全局默认注册表获取工具（已禁用的视为不存在）"""
+        cls._load_persisted_states()
         return cls._get_default().get_instance(name)
 
     @classmethod
@@ -175,7 +277,8 @@ class ToolRegistry:
 
     @classmethod
     def list(cls) -> Dict[str, ITool]:
-        """列出全局默认注册表的所有工具"""
+        """列出全局默认注册表的所有工具（不含已禁用的）"""
+        cls._load_persisted_states()
         return cls._get_default().list_instance()
 
     @classmethod
@@ -203,8 +306,9 @@ class ToolRegistry:
     @classmethod
     def search(cls, query: str, limit: int = 10,
                include_commands: bool = True) -> List[Dict[str, Any]]:
-        """搜索工具 + 用户命令（常用度排序）"""
+        """搜索工具 + 用户命令（常用度排序，已禁用的不出现在结果里）"""
         cls._load_persisted_commands()
+        cls._load_persisted_states()
         return cls._get_default().search_instance(query, limit, include_commands)
 
     @classmethod
