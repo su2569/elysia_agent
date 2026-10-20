@@ -20,6 +20,8 @@ class ToolRegistry:
     _default_instance: Optional["ToolRegistry"] = None
     # 启停状态是否已从磁盘读回（只读一次，避免工具热路径反复读盘）
     _states_loaded: bool = False
+    # 用户命令是否已从磁盘读回（同上，热路径只读一次）
+    _commands_loaded: bool = False
 
     def __init__(self):
         self._tools: Dict[str, ITool] = {}
@@ -144,14 +146,23 @@ class ToolRegistry:
         return safe_join("data", "user_commands.json")
 
     @classmethod
-    def _load_persisted_commands(cls) -> None:
-        """启动/搜索前加载持久化的用户命令"""
+    def _load_persisted_commands(cls, force: bool = False) -> None:
+        """启动/搜索前加载持久化的用户命令（默认只读一次）。
+
+        用 setdefault 合并，已存在（内存优先）的命令不会被磁盘旧值覆盖。
+        force=True 可强制重读。
+        """
         import os as _os, json as _json
+        if cls._commands_loaded and not force:
+            return
+        cls._commands_loaded = True
         path = cls._commands_path()
         if _os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = _json.load(f)
+                if not isinstance(data, dict):
+                    return
                 for name, cmd in data.items():
                     cls._get_default()._commands.setdefault(name, cmd)
             except Exception:
@@ -159,15 +170,33 @@ class ToolRegistry:
 
     @classmethod
     def _save_persisted_commands(cls) -> None:
-        import os as _os, json as _json
-        from pathlib import Path
+        """持久化用户命令：先读回磁盘已有命令再合并内存态，避免重启后
+        全量覆盖把先前注册的自定义命令抹掉。原子写（临时文件+os.replace）。"""
+        import os as _os, json as _json, tempfile as _tf
         path = cls._commands_path()
         try:
             _os.makedirs(_os.path.dirname(path), exist_ok=True)
-            Path(path).write_text(
-                _json.dumps(cls._get_default()._commands, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            merged = {}
+            if _os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        disk = _json.load(f)
+                    if isinstance(disk, dict):
+                        merged.update(disk)
+                except Exception:
+                    pass
+            merged.update(cls._get_default()._commands)
+            fd, tmp = _tf.mkstemp(dir=_os.path.dirname(path), suffix=".tmp")
+            try:
+                with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                    _json.dump(merged, f, ensure_ascii=False, indent=2)
+                _os.replace(tmp, path)
+            finally:
+                if _os.path.exists(tmp):
+                    try:
+                        _os.remove(tmp)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
