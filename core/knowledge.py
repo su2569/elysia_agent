@@ -277,9 +277,11 @@ def rebuild_index(data_dir: str, kb_name: str, metadata: Optional[Dict[str, Any]
     }
     with open(os.path.join(_kb_dir(data_dir, safe_kb), "chunks.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
+    # indexed 必须与 list_kbs 的判定一致（chunk_count > 0），
+    # 否则「空库重建索引」会返回 indexed=True，而列表里显示 False
     return {
         "kb": safe_kb,
         "chunk_count": len(all_chunks),
         "source_count": source_count,
-        "indexed": True,
+        "indexed": len(all_chunks) > 0,
     }
