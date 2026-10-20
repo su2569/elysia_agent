@@ -180,9 +180,15 @@ class CronScheduler:
         name: str,
         kind: str,
         payload: Optional[Dict[str, Any]] = None,
+        strict: bool = False,
         **kwargs
     ) -> str:
         """注册定时任务（同步 API——注册即持久化）
+
+        Args:
+            strict: True 时若落盘失败，撤销内存中的任务并抛 RuntimeError，
+                    让调用方（HTTP 接口）能如实回 500；False（默认）保持
+                    旧行为，只记日志。默认 False 是为了不打断 Runner 工具接线。
 
         Returns:
             task_id
@@ -197,8 +203,13 @@ class CronScheduler:
         task.validate()
         self._tasks[task.task_id] = task
         task.next_run = self._compute_next(time.time(), task)
-        self._save_state()
-        logger.info(f"定时任务注册: {task.name} ({task.task_id}) kind={task.kind} next_run={task.next_run}")
+        if not self._save_state():
+            if strict:
+                self._tasks.pop(task.task_id, None)
+                raise RuntimeError("任务状态写入失败，任务未创建")
+            logger.error(f"定时任务已注册但未落盘，重启后会丢失: {task.name} ({task.task_id})")
+        else:
+            logger.info(f"定时任务注册: {task.name} ({task.task_id}) kind={task.kind} next_run={task.next_run}")
         return task.task_id
 
     async def register_async(self, *args, **kwargs) -> str:
@@ -206,24 +217,45 @@ class CronScheduler:
         return self.register(*args, **kwargs)
 
     def unregister(self, task_id: str) -> bool:
-        """删除任务"""
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-            self._save_state()
-            logger.info(f"定时任务删除: {task_id}")
-            return True
-        return False
+        """删除任务。
+
+        Returns:
+            True 只在「内存已删 且 磁盘已同步」时返回。
+            落盘失败时把任务放回内存并返回 False —— 否则接口说删了、
+            重启后任务又回来，用户会以为是自己看错了。
+        """
+        if task_id not in self._tasks:
+            return False
+        removed = self._tasks.pop(task_id)
+        if not self._save_state():
+            self._tasks[task_id] = removed
+            logger.error(f"定时任务删除未落盘，已回滚: {task_id}")
+            return False
+        logger.info(f"定时任务删除: {task_id}")
+        return True
 
     def set_enabled(self, task_id: str, enabled: bool) -> bool:
-        """启用/禁用任务（持久化语义，重启保持）"""
+        """启用/禁用任务（持久化语义，重启保持）。
+
+        Returns:
+            True 只在「内存已改 且 磁盘已同步」时返回；落盘失败时回滚内存态。
+        """
         task = self._tasks.get(task_id)
         if not task:
             return False
+        prev_enabled = task.enabled
+        prev_failures = task.consecutive_failures
+        prev_next = task.next_run
         task.enabled = enabled
         if enabled:
             task.consecutive_failures = 0
             task.next_run = self._compute_next(time.time(), task)
-        self._save_state()
+        if not self._save_state():
+            task.enabled = prev_enabled
+            task.consecutive_failures = prev_failures
+            task.next_run = prev_next
+            logger.error(f"定时任务启停未落盘，已回滚: {task_id}")
+            return False
         return True
 
     def list_tasks(self) -> List[Dict[str, Any]]:
@@ -323,21 +355,41 @@ class CronScheduler:
 
     # ---------- 持久化 ----------
 
-    def _save_state(self) -> None:
-        """原子写持久化（临时文件 + rename）"""
+    def _save_state(self) -> bool:
+        """原子写持久化（临时文件 + rename）。
+
+        Returns:
+            True 表示已真正落盘；False 表示写失败（已记 error 日志）。
+
+        历史缺陷（2026-10-21 巡检发现）：本方法原先返回 None，写盘失败只记日志，
+        而 register / unregister / set_enabled 的调用方一律回 {"success": True}——
+        任务当场在内存里生效，接口说成功，重启后却不见了。这是「报告了成功、
+        结果却没发生」的第八处，与 tool_states / user_commands 完全同形。
+        """
         state = {
             "version": self.STATE_VERSION,
             "saved_at": time.time(),
             "tasks": [asdict(t) for t in self._tasks.values()],
         }
+        tmp = None
         try:
             os.makedirs(os.path.dirname(self._state_path) or ".", exist_ok=True)
             tmp = self._state_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self._state_path)
+            return True
         except Exception as e:
             logger.error(f"cron 状态持久化失败: {e}", exc_info=True)
+            if tmp:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+            return False
 
     def _load_state(self) -> None:
         """恢复持久化任务"""
