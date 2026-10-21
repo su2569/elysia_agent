@@ -200,6 +200,10 @@ async def daily_summary_tool(date: str = "", _ctx=None):
     if not memory or not isinstance(memory, EnhancedMemory):
         return f"【错误】记忆系统未初始化，{date} 的每日总结未执行"
 
+    # 配置里关掉每日总结，就不执行（如实说明，不谎报"已触发"）
+    if not getattr(memory, "daily_summary_enabled", True):
+        return f"【每日总结】{date} 未执行：配置 memory_node.enable_daily_summary 已关闭"
+
     # 获取当天事件
     events = await memory.node_manager.get_events_by_date(date)
 

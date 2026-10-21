@@ -27,9 +27,13 @@ async def auto_inject_history(ctx, **kwargs):
 
     # 检查是否为新会话（step_count == 0 且没有历史）
     if ctx.step_count == 0 and not ctx.injected_pre.get("_history_injected"):
+        # 天数取自 memory_node 配置，不再硬编码 3 / 7
+        _mn = getattr(memory, "_mn", None)
+        days_important = _mn("inject_recent_days", 3) if _mn else 3
+        days_summary = _mn("inject_summary_days", 7) if _mn else 7
         history_context = await memory.get_new_session_context(
-            days_important=3,
-            days_summary=7
+            days_important=days_important,
+            days_summary=days_summary
         )
 
         if history_context:
@@ -51,15 +55,20 @@ async def auto_recall_on_chat(ctx, **kwargs):
     if not ctx.query:
         return
 
-    # 自动回忆相关记忆
-    recall_results = await memory.auto_recall(ctx.query, top_k=3)
+    # 自动回忆相关记忆（条数取自 memory_node.max_nodes_per_recall）
+    _mn = getattr(memory, "_mn", None)
+    max_nodes = _mn("max_nodes_per_recall", 5) if _mn else 5
+    if max_nodes < 1:
+        max_nodes = 1
+
+    recall_results = await memory.auto_recall(ctx.query, top_k=max_nodes)
 
     if recall_results:
         # 将回忆结果注入上下文
         ctx.injected_pre["auto_recall"] = recall_results
 
         # 同时检索记忆节点
-        nodes = await memory.recall_nodes(ctx.query, limit=3)
+        nodes = await memory.recall_nodes(ctx.query, limit=max_nodes)
         if nodes:
             ctx.injected_pre["recalled_nodes"] = [
                 {"name": n.name, "type": n.node_type, "desc": n.description[:50]}

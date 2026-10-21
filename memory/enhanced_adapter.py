@@ -27,10 +27,37 @@ class EnhancedMemory(IMemoryService):
     融合原 SQLiteMemory + APLR 记忆节点系统
     """
 
-    def __init__(self, db_path: str = "./data/elysia_memory.sqlite", node_db_path: str = "./data/memory_nodes.sqlite"):
+    def __init__(self, db_path: str = "./data/elysia_memory.sqlite", node_db_path: str = "./data/memory_nodes.sqlite",
+                 node_config=None):
         self.base_memory = SQLiteMemory(db_path=db_path)
         self.node_manager = MemoryNodeManager(db_path=node_db_path)
+        # 记忆节点配置（Settings.memory_node）。历史教训：这段配置写在 elysia.json 里
+        # 十个字段，却没有任何一行代码去读它，改配置不生效。统一从这里取。
+        self.node_config = node_config
         logger.info("EnhancedMemory initialized with node system")
+
+    def _mn(self, name: str, default):
+        """读取 memory_node 配置项，缺失/非法一律回落到默认值。
+
+        这个模块的调用方既有生产 Runner，也有大量测试和基准脚本（不传配置）。
+        所以这里必须容错：配置为 None、字段不存在、值类型不对，都不能抛异常。
+        """
+        cfg = self.node_config
+        if cfg is None:
+            return default
+        val = getattr(cfg, name, default) if not isinstance(cfg, dict) else cfg.get(name, default)
+        if val is None:
+            return default
+        if isinstance(default, bool):
+            return bool(val) if isinstance(val, (bool, int)) else default
+        if isinstance(default, int):
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return default
+        if isinstance(default, dict):
+            return dict(val) if isinstance(val, dict) else default
+        return val
 
     async def retrieve(
         self, user_id: str, query: str, group_id: Optional[str] = None,
@@ -49,20 +76,31 @@ class EnhancedMemory(IMemoryService):
             **filters
         )
 
+        # 以下全部取自 memory_node 配置，不再硬编码
+        max_nodes = self._mn("max_nodes_per_recall", 5)
+        if max_nodes < 1:
+            max_nodes = 1
+        recent_days = self._mn("inject_recent_days", 3)
+        weights = self._mn("recall_weights", None)
+
         # 记忆节点检索（APLR风格）- 全部加 await
-        nodes = await self.node_manager.search_nodes(query, limit=5)
-        related_events = await self.node_manager.recall_with_ranking(query, top_k=5)
+        nodes = await self.node_manager.search_nodes(query, limit=max_nodes)
+        related_events = await self.node_manager.recall_with_ranking(
+            query, top_k=max_nodes, weights=weights
+        )
 
         # 近期重要事件
-        recent_events = await self.node_manager.get_recent_events(days=3, min_importance=0.6)
+        recent_events = await self.node_manager.get_recent_events(days=recent_days, min_importance=0.6)
 
         # 每日总结
-        today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         daily_summary = await self.node_manager.get_daily_summary(yesterday)
 
-        # 主题
-        themes = await self.node_manager.get_themes()
+        # 主题（enable_theme_clustering 关闭时不注入主题）
+        if self._mn("enable_theme_clustering", True):
+            themes = await self.node_manager.get_themes()
+        else:
+            themes = []
 
         return {
             **base_result,
@@ -165,6 +203,16 @@ class EnhancedMemory(IMemoryService):
         """获取每日总结"""
         return await self.node_manager.get_daily_summary(date)
 
+    @property
+    def daily_summary_enabled(self) -> bool:
+        """每日总结是否启用（对应 memory_node.enable_daily_summary）"""
+        return self._mn("enable_daily_summary", True)
+
+    @property
+    def nodes_enabled(self) -> bool:
+        """记忆节点系统总开关（对应 memory_node.enabled）"""
+        return self._mn("enabled", True)
+
     async def get_new_session_context(self, days_important: int = 3, days_summary: int = 7) -> str:
         """
         获取新会话上下文注入内容（APLR风格）
@@ -174,6 +222,10 @@ class EnhancedMemory(IMemoryService):
         - 近N天每日总结
         """
         parts = []
+
+        # 配置里关掉新会话注入，就直接返回空串（调用方会据此跳过注入）
+        if not self._mn("auto_inject_on_new_session", True):
+            return ""
 
         # 近期重要事件
         recent = await self.node_manager.get_recent_events(days=days_important, min_importance=0.7)
@@ -202,6 +254,11 @@ class EnhancedMemory(IMemoryService):
 
         聊天时自动检索相关记忆并注入
         """
+        # 配置里关掉自动回忆，就不检索（返回空列表，钩子自然不注入）
+        if not self._mn("enable_auto_recall", True):
+            return []
+        if weights is None:
+            weights = self._mn("recall_weights", None)
         results = await self.node_manager.recall_with_ranking(query, top_k=top_k, weights=weights)
         return [
             {
