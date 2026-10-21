@@ -552,6 +552,10 @@ class MCPClient:
         self._id_counter = itertools.count(1)
         self._pending: Dict[Any, asyncio.Future] = {}
         self._closed = False
+        # 传输层是否真的关掉了。_closed 只表示"逻辑上不再可用"，
+        # 传输层关闭失败时必须保留可重试状态，否则后续 close() 直接返回、
+        # 会话/子进程永久泄漏且无任何日志。
+        self._transport_closed = False
         self.server_info: Dict[str, Any] = {}
         self.negotiated_version: str = MCP_PROTOCOL_VERSION
         self.server_capabilities: Dict[str, Any] = {}
@@ -595,15 +599,25 @@ class MCPClient:
         )
 
     async def close(self) -> None:
-        """关闭连接，未决请求统一失败。"""
-        if self._closed:
+        """关闭连接，未决请求统一失败。
+
+        幂等且**可重试**：只有传输层真的关掉了才记 _transport_closed。
+        传输层关闭失败时保留重试机会并记 warning —— 否则 _closed 已置位，
+        后续 close() 会直接 return，会话/子进程永久泄漏且没有任何痕迹。
+        """
+        if self._transport_closed:
             return
         self._closed = True
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_exception(MCPConnectionError("MCP 客户端已关闭"))
         self._pending.clear()
-        await self._transport.close()
+        try:
+            await self._transport.close()
+        except Exception as e:
+            logger.warning(f"MCP[{self.name}] 传输层关闭失败（保留重试机会）: {e}")
+            raise
+        self._transport_closed = True
 
     @property
     def connected(self) -> bool:
@@ -1014,8 +1028,9 @@ class MCPManager:
         if client is not None:
             try:
                 await client.close()
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as e:
+                # 不静默：连接没关掉意味着会话/子进程还在，需要留下线索
+                logger.warning(f"MCP[{name}] 卸载时关闭连接失败: {e}")
             entry["client"] = None
 
     # -- 状态 --------------------------------------------------------------
