@@ -381,10 +381,11 @@ class AsyncMemoryQueue:
         stores = [b for b in batch if b["op"] == "store"]
         others = [b for b in batch if b["op"] != "store"]
 
-        # 批量写入
+        # 批量写入（逐条隔离：单条失败不连累同批其他记忆）
+        failed = 0
         if stores and self.memory:
-            try:
-                for s in stores:
+            for s in stores:
+                try:
                     await self.memory.store(
                         user_id=s.get("user_id", ""),
                         memory_type=s.get("memory_type", "passive"),
@@ -393,9 +394,18 @@ class AsyncMemoryQueue:
                         importance=s.get("importance", 0.5),
                         tags=s.get("tags")
                     )
+                except Exception as e:
+                    failed += 1
+                    logger.error(
+                        f"Memory store failed (user={s.get('user_id', '')}, "
+                        f"type={s.get('memory_type', 'passive')}): {e}"
+                    )
+            if failed:
+                logger.warning(
+                    f"Memory batch flush: {len(stores) - failed} ok, {failed} failed"
+                )
+            else:
                 logger.debug(f"Memory batch flush: {len(stores)} stores")
-            except Exception as e:
-                logger.error(f"Memory batch flush failed: {e}")
 
         # 处理其他操作
         for op in others:
