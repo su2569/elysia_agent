@@ -81,6 +81,7 @@ class ModuleRecovery:
         self._reload_counts: Dict[str, int] = {}
         self._crashes: List[Dict[str, Any]] = []
         self._disabled: set = set()  # 重载超限后禁用的模块
+        self._last_save_ok: bool = True  # 最近一次 _save 是否成功
         self._load_history()
 
     # ==================== 报告持久化 ====================
@@ -112,16 +113,39 @@ class ModuleRecovery:
         except Exception as e:
             logger.warning(f"读取崩溃报告失败（忽略）: {e}")
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
+        """把崩溃报告写入磁盘。
+
+        Returns:
+            True=已落盘；False=写盘失败（已记 error 日志）。
+
+        原实现 `except Exception: pass` 连日志都不打，失败完全无声。
+        崩溃报告是 give_up 禁用状态的唯一持久化载体，写不进去等于
+        「本次进程内禁用了，重启后又活过来」，而调用方毫不知情。
+        崩溃处理路径本身不能抛异常（否则处理崩溃的代码自己崩），
+        所以这里只返回 False + 记日志，由调用方决定如何上报。
+        """
         try:
             from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
-            Path(self.report_file).write_text(
+            target = self.report_file
+            tmp = target + ".tmp"
+            Path(tmp).write_text(
                 json.dumps({"crashes": self._crashes[-100:]}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except Exception:
-            pass
+            os.replace(tmp, target)
+            self._last_save_ok = True
+            return True
+        except Exception as e:
+            self._last_save_ok = False
+            logger.error(f"崩溃报告写入失败（本次记录未持久化，重启后会丢失）: {e}")
+            try:
+                if os.path.exists(self.report_file + ".tmp"):
+                    os.remove(self.report_file + ".tmp")
+            except Exception:
+                pass
+            return False
 
     # ==================== 崩溃处理 ====================
 
@@ -171,10 +195,29 @@ class ModuleRecovery:
             # 已自动重载过 max_reload 次：标记禁用，不再循环
             self._disabled.add(module)
             rec = self.record_crash(module, location, exc, action="give_up", severity="critical")
-            self._mark_disabled(module)
+            disabled_persisted = self._mark_disabled(module)
+            report_persisted = bool(getattr(self, "_last_save_ok", False))
+            all_persisted = disabled_persisted and report_persisted
+            if not all_persisted:
+                # 本次进程内确实禁用了，但磁盘上没留下痕迹：重启后会复活。
+                # 不许沉默——把两个持久化结果如实带出去。
+                logger.error(
+                    f"模块 {module} 已在本进程内禁用，但持久化失败"
+                    f"（禁用状态={disabled_persisted}, 崩溃报告={report_persisted}），"
+                    f"重启后会被重新加载"
+                )
             logger.error(f"模块 {module} 连续崩溃，已停止自动重载（已禁用）")
+            if all_persisted:
+                msg = f"模块 {module} 连续崩溃，已禁用"
+            else:
+                msg = (f"模块 {module} 连续崩溃，已在本进程内禁用，"
+                       f"但状态未能写入磁盘，重启后会被重新加载")
             return {"action": "give_up", "module": module, "location": location,
-                    "message": f"模块 {module} 连续崩溃，已禁用", "crash": asdict(rec)}
+                    "message": msg,
+                    "persisted": all_persisted,
+                    "disabled_persisted": disabled_persisted,
+                    "report_persisted": report_persisted,
+                    "crash": asdict(rec)}
 
         self._reload_counts[module] = count + 1
 
@@ -248,14 +291,34 @@ class ModuleRecovery:
             logger.error(f"完全重载失败: {e}")
             return False
 
-    def _mark_disabled(self, module: str) -> None:
-        """重载超限：持久化禁用（下次启动不加载）"""
+    def _mark_disabled(self, module: str) -> bool:
+        """重载超限：持久化禁用（下次启动不加载）
+
+        Returns:
+            True=禁用状态已落盘；False=落盘失败（重启后该模块会被重新加载）。
+            一个只在本次进程内生效的「已禁用」，重启后就复活，
+            而用户以为它已经被永久停掉了，所以必须如实上报。
+        """
         if self.pm is None:
-            return
+            return False
         name = module.split(":", 1)[-1]
-        if name not in self.pm._persisted["disabled"]:
-            self.pm._persisted["disabled"].append(name)
-            self.pm._save_persisted_state()
+        if name in self.pm._persisted["disabled"]:
+            return True
+        self.pm._persisted["disabled"].append(name)
+        saver = getattr(self.pm, "_save_persisted_state", None)
+        if saver is None:
+            return False
+        try:
+            ok = saver()
+        except Exception as e:
+            logger.error(f"持久化禁用 {name} 时异常: {e}")
+            return False
+        if ok is False:
+            logger.error(
+                f"模块 {name} 的禁用状态未能写入 plugin_state.json，重启后会被重新加载"
+            )
+            return False
+        return True
 
     # ==================== 查询 ====================
 
