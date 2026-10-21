@@ -403,9 +403,14 @@ class StreamableHTTPTransport(ITransport):
 
     async def close(self) -> None:
         self._closed = True
-        session, self._session = self._session, None
+        # 注意：只有真的关掉之后才丢弃 _session 引用。
+        # 先 `session, self._session = self._session, None` 再 close，
+        # 一旦 close 抛异常，引用已经没了 —— 上层重试时拿到 None，
+        # 直接当「已关闭」返回，aiohttp 会话永久泄漏且无迹可寻。
+        session = self._session
         if session is not None and not session.closed:
             await session.close()
+        self._session = None
 
 
 class SseTransport(ITransport):
@@ -521,9 +526,12 @@ class SseTransport(ITransport):
         task, self._read_task = self._read_task, None
         if task is not None and not task.done():
             task.cancel()
-        session, self._session = self._session, None
+        # 同 StreamableHTTPTransport：关闭成功后才丢弃 session 引用，
+        # 否则关闭失败时引用先被清空，重试将永远拿不到那个会话。
+        session = self._session
         if session is not None and not session.closed:
             await session.close()
+        self._session = None
 
 
 # ---------------------------------------------------------------------------
