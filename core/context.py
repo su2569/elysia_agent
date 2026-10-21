@@ -71,6 +71,26 @@ class AgentContext:
     start_time: datetime = field(default_factory=datetime.now)
     end_time: Optional[datetime] = None
 
+    # === 记忆系统统一入口 ===
+    # 历史教训：runner 注入的是 "_memory_weakref"（弱引用，防循环引用），
+    # 而 hooks.py / aplr_tools.py 却各自去取 "_memory"，永远取不到，
+    # 导致三个钩子每次都在第一行 return，六个记忆工具全部报"未初始化"。
+    # 统一从这里取，两种键名都认，避免再次分叉。
+    @property
+    def memory(self):
+        """获取记忆系统实例（支持弱引用与强引用两种注入方式）"""
+        if not isinstance(self.metadata, dict):
+            return None
+        weak = self.metadata.get("_memory_weakref")
+        if weak is not None:
+            try:
+                mem = weak() if callable(weak) else weak
+            except Exception:
+                mem = None
+            if mem is not None:
+                return mem
+        return self.metadata.get("_memory")
+
     def add_thought(self, step: int, thought: str, action: Optional[str] = None):
         """记录思考链"""
         self.thought_chain.append({

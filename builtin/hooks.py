@@ -21,7 +21,7 @@ async def auto_inject_history(ctx, **kwargs):
     - 近3天重要事件
     - 近7天每日总结
     """
-    memory = ctx.metadata.get("_memory")
+    memory = ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return
 
@@ -44,7 +44,7 @@ async def auto_recall_on_chat(ctx, **kwargs):
 
     根据用户输入自动检索相关记忆节点和事件
     """
-    memory = ctx.metadata.get("_memory")
+    memory = ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return
 
@@ -75,7 +75,7 @@ async def extract_nodes_from_conversation(ctx, **kwargs):
 
     从对话内容中提取人物、地点、概念等节点
     """
-    memory = ctx.metadata.get("_memory")
+    memory = ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return
 

@@ -33,7 +33,7 @@ async def recall_memory_tool(query: str, count: int = 3, _ctx=None):
     if not _ctx or not hasattr(_ctx, 'metadata'):
         return "【错误】无法访问记忆系统"
 
-    memory = _ctx.metadata.get("_memory")
+    memory = _ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return "【错误】记忆系统未初始化"
 
@@ -62,7 +62,7 @@ async def recall_node_tool(name: str, _ctx=None):
     if not _ctx or not hasattr(_ctx, 'metadata'):
         return "【错误】无法访问记忆系统"
 
-    memory = _ctx.metadata.get("_memory")
+    memory = _ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return "【错误】记忆系统未初始化"
 
@@ -101,7 +101,7 @@ async def deep_recall_tool(target: str, mode: str = "event", _ctx=None):
     if not _ctx or not hasattr(_ctx, 'metadata'):
         return "【错误】无法访问记忆系统"
 
-    memory = _ctx.metadata.get("_memory")
+    memory = _ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return "【错误】记忆系统未初始化"
 
@@ -143,7 +143,7 @@ async def recall_recent_events_tool(days: int = 7, min_score: float = 0.5, _ctx=
     if not _ctx or not hasattr(_ctx, 'metadata'):
         return "【错误】无法访问记忆系统"
 
-    memory = _ctx.metadata.get("_memory")
+    memory = _ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return "【错误】记忆系统未初始化"
 
@@ -174,7 +174,7 @@ async def write_node_tool(name: str, node_type: str, description: str, importanc
     if not _ctx or not hasattr(_ctx, 'metadata'):
         return "【错误】无法访问记忆系统"
 
-    memory = _ctx.metadata.get("_memory")
+    memory = _ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
         return "【错误】记忆系统未初始化"
 
@@ -196,9 +196,9 @@ async def daily_summary_tool(date: str = "", _ctx=None):
     if not _ctx or not hasattr(_ctx, 'metadata'):
         return f"【每日总结】{date} 的总结已触发（记忆系统未完全初始化）"
 
-    memory = _ctx.metadata.get("_memory")
+    memory = _ctx.memory
     if not memory or not isinstance(memory, EnhancedMemory):
-        return f"【每日总结】{date} 的总结已触发"
+        return f"【错误】记忆系统未初始化，{date} 的每日总结未执行"
 
     # 获取当天事件
     events = await memory.node_manager.get_events_by_date(date)
