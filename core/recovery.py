@@ -112,6 +112,10 @@ class ModuleRecovery:
                     self._disabled.add(mod)
         except Exception as e:
             logger.warning(f"读取崩溃报告失败（忽略）: {e}")
+            # 损坏原件先留档：崩溃报告是 give_up 禁用状态的唯一载体，
+            # 被一次正常保存覆盖后无法重建。
+            from ..utils.state_file import backup_corrupt_file
+            backup_corrupt_file(self.report_file, logger, reason="崩溃报告解析失败")
 
     def _save(self) -> bool:
         """把崩溃报告写入磁盘。

@@ -414,3 +414,6 @@ class CronScheduler:
             logger.info(f"cron 状态恢复: {len(self._tasks)} 个任务")
         except Exception as e:
             logger.error(f"cron 状态文件加载失败: {e}", exc_info=True)
+            # 损坏原件先留档：任务表是用户手设的提醒，被空表覆盖后无法恢复。
+            from ..utils.state_file import backup_corrupt_file
+            backup_corrupt_file(self._state_path, logger, reason="定时任务状态解析失败")

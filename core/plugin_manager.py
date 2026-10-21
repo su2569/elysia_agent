@@ -162,6 +162,10 @@ class PluginManager:
                 self._persisted["swapped"] = list(data.get("swapped", []))
         except Exception as e:
             logger.warning(f"Failed to load plugin state: {e}")
+            # 损坏原件先留档：否则下一次保存会把 disabled/swapped 覆盖成全空，
+            # 用户此前禁用的插件列表就此永久丢失。
+            from ..utils.state_file import backup_corrupt_file
+            backup_corrupt_file(self.state_file, logger, reason="插件状态解析失败")
 
     def _save_persisted_state(self) -> bool:
         """保存插件状态到磁盘。

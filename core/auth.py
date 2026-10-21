@@ -121,6 +121,10 @@ class AuthManager:
                     self._pending[req.request_id] = req
         except Exception as e:
             logger.warning(f"Failed to load auth state: {e}")
+            # 损坏原件先留档：后续任何一次 _save 都会把它覆盖成空状态，
+            # 而 auth.json 里可能存着不可再生的授权记录。
+            from ..utils.state_file import backup_corrupt_file
+            backup_corrupt_file(self.state_file, logger, reason="auth 状态解析失败")
 
     def _save(self) -> bool:
         """持久化权限状态，返回是否写盘成功。

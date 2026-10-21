@@ -165,8 +165,16 @@ class ToolRegistry:
                     return
                 for name, cmd in data.items():
                     cls._get_default()._commands.setdefault(name, cmd)
-            except Exception:
-                pass
+            except Exception as e:
+                # 原来这里是静默 pass：文件损坏后，下一次保存会把磁盘上
+                # 已有的自定义命令全量覆盖成内存态（可能为空）。
+                try:
+                    import logging as _lg
+                    _lg.getLogger(__name__).warning(f"用户命令读取失败: {e}")
+                except Exception:
+                    pass
+                from ..utils.state_file import backup_corrupt_file
+                backup_corrupt_file(path, None, reason="用户命令解析失败")
 
     @classmethod
     def _save_persisted_commands(cls) -> bool:
@@ -236,7 +244,15 @@ class ToolRegistry:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
-        except Exception:
+        except Exception as e:
+            # 文件损坏：先留档再保持全启用，避免下次保存覆盖原件
+            try:
+                import logging as _lg
+                _lg.getLogger(__name__).warning(f"工具启停状态读取失败: {e}")
+            except Exception:
+                pass
+            from ..utils.state_file import backup_corrupt_file
+            backup_corrupt_file(path, None, reason="工具启停状态解析失败")
             return
         if not isinstance(data, dict):
             return
