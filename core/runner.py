@@ -79,6 +79,10 @@ class ElysiaRunner:
                 blacklist_duration=self.settings.guard.blacklist_duration,
                 whitelist=self.settings.guard.whitelist,
                 enable_llm_review=self.settings.guard.enable_llm_review,
+                enable_anti_harassment=getattr(
+                    self.settings.guard, "enable_anti_harassment", True),
+                incident_history_size=getattr(
+                    self.settings.guard, "incident_history_size", 100),
             )
 
         self._total_runs = AtomicCounter(0)

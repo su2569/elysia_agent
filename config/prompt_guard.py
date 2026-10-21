@@ -15,6 +15,7 @@ L3: 策略引擎（执行防御动作）
 """
 import re
 import base64
+import unicodedata
 import json
 import asyncio
 import aiosqlite
@@ -116,6 +117,32 @@ class PTDEngine:
             r"(种族|民族|国家).*(优越|歧视|仇恨|消灭)",
             r"(屠杀|genocide|种族灭绝|清洗|purge)",
         ],
+        # --- 以下 5 类此前只在文档字符串里"声称覆盖"，PATTERNS 里并不存在 ---
+        "violence": [
+            r"(怎么|如何|怎样|教我|求教).{0,6}(制作|制造|组装|DIY).{0,4}(炸弹|炸药|枪|枪支|燃烧瓶|毒气)",
+            r"(制作|制造|合成).{0,4}(炸弹|炸药|枪支|燃烧瓶|毒气|神经毒剂)",
+            r"(how to|teach me).{0,12}(make|build).{0,6}(bomb|explosive|gun|molotov)",
+        ],
+        "self_harm": [
+            r"(我想|我要|打算|准备).{0,4}(自杀|轻生|结束生命|了断自己)",
+            r"(怎么|如何|怎样).{0,4}(自杀|轻生|结束自己)",
+            r"(suicide|kill myself|end my life)",
+        ],
+        "illegal": [
+            r"(怎么|如何|怎样).{0,4}(洗钱|逃税|走私|贩毒|制毒|诈骗)",
+            r"(洗钱|money laundering|逃税|tax evasion|贩毒|drug trafficking)",
+            r"(黑客|hack).{0,4}(入侵|攻击|盗号|盗取)",
+        ],
+        "privacy": [
+            r"(人肉|开盒|社工库|查户籍|doxx?ing)",
+            r"(身份证号|手机号|家庭住址).{0,6}(查|找|搜|获取)",
+            r"(帮我|替我).{0,4}(查|找|人肉).{0,4}(某个人|这个人|他的|她的)",
+        ],
+        "system_probe": [
+            r"(你的|system).{0,4}(系统提示|system prompt|初始指令|initial instruction)",
+            r"(输出|打印|告诉我|重复).{0,6}(你的|你的全部).{0,4}(提示词|设定|指令|prompt)",
+            r"(reveal|show|print|repeat).{0,10}(your).{0,6}(system prompt|instructions)",
+        ],
     }
 
     # 敏感关键词权重 (120+)
@@ -152,16 +179,60 @@ class PTDEngine:
         "intercept": "立即拒绝",
     }
 
-    def __init__(self, mode: str = "intercept", threshold: float = 30.0):
+    def __init__(self, mode: str = "intercept", threshold: float = 30.0,
+                 enable_anti_harassment: bool = True):
         self.mode = mode if mode in self.MODES else "intercept"
         self.threshold = threshold
+        # guard.enable_anti_harassment：此前只在 settings.py 定义、全项目零引用，
+        # 是一个"假开关"——写 false 不会变，写 true 也不会变。现在真的接上了。
+        self.enable_anti_harassment = bool(enable_anti_harassment)
         self.compiled_patterns = self._compile_patterns()
 
+    @staticmethod
+    def _normalize_boundary(pattern: str) -> str:
+        """把 \b 改写为「ASCII 词字符」边界，兼容中文。
+
+        原因：\b 在 Python re 里只认 [A-Za-z0-9_] 这类词字符。中文字符不是词字符，
+        所以 "\b傻逼\b" 对「你个傻逼」匹配失败——中文词被前后汉字包住时，
+        \b 认为「本来就没有边界」，整条规则对中文句子完全失效。
+
+        改成「前面/后面不是 ASCII 字母数字」的断言后：
+          - 「你个傻逼」中的「傻逼」命中（前面是「个」，不是 ASCII）
+          - "sbin" 中的 "sb" 不命中（后面是字母 i）
+          - "bullshit" 中的 "shit" 不命中（前面是字母 l）
+        """
+        if r"\b" not in pattern:
+            return pattern
+        out = []
+        i = 0
+        n = len(pattern)
+        while i < n:
+            if pattern.startswith(r"\b", i):
+                # \b 的语义取决于它紧邻的前一个字符：
+                #   - 前面没有东西，或前一个字符是 "(" —— 这是「词首」边界
+                #   - 前面是实体（字母/数字/下划线/右括号/汉字等）—— 这是「词尾」边界
+                prev = pattern[i - 1] if i > 0 else ""
+                if prev and prev not in "([|":
+                    out.append(r"(?![A-Za-z0-9_])")
+                else:
+                    out.append(r"(?<![A-Za-z0-9_])")
+                i += 2
+            else:
+                out.append(pattern[i])
+                i += 1
+        return "".join(out)
+
     def _compile_patterns(self) -> Dict[str, List[re.Pattern]]:
-        """编译正则"""
+        """编译正则（\b 先归一为兼容中文的边界）"""
         compiled = {}
         for attack_type, patterns in self.PATTERNS.items():
-            compiled[attack_type] = [re.compile(p, re.IGNORECASE) for p in patterns]
+            if attack_type == "harassment" and not self.enable_anti_harassment:
+                # 关闭时不编译骚扰规则，detect 里自然也不会命中这一类
+                compiled[attack_type] = []
+                continue
+            compiled[attack_type] = [
+                re.compile(self._normalize_boundary(p), re.IGNORECASE) for p in patterns
+            ]
         return compiled
 
     def detect(self, text: str) -> GuardResult:
@@ -215,7 +286,12 @@ class PTDEngine:
             reasons.append("超长消息(+5)")
 
         # 5. 特殊字符密度
-        special_chars = sum(1 for c in text if ord(c) > 127 or c in r"<>[]{}|")
+        #    注意：这里曾写成 ord(c) > 127，等于把所有汉字都算成"特殊字符"。
+        #    结果是任何一句正常中文都比同样长度的英文多 10 分底噪——
+        #    一个只用英文测过的防御，对中文天生有偏见。
+        #    改为按 Unicode 类别判定：只数符号(S*)与标点(P*)，字母(L*)和数字(N*)一律不算，
+        #    这样中英文一视同仁。
+        special_chars = sum(1 for c in text if unicodedata.category(c)[0] in "SP")
         if len(text) > 0 and special_chars / len(text) > 0.3:
             score += 10
             reasons.append("特殊字符密度高(+10)")
@@ -317,8 +393,13 @@ class PromptGuard:
         whitelist: Optional[List[str]] = None,
         enable_llm_review: bool = False,
         db_path: str = "./data/guard_blacklist.sqlite",
+        enable_anti_harassment: bool = True,
+        incident_history_size: int = 100,
     ):
-        self.ptd = PTDEngine(mode=mode, threshold=threshold)
+        self.ptd = PTDEngine(
+            mode=mode, threshold=threshold,
+            enable_anti_harassment=enable_anti_harassment,
+        )
         self.mode = mode
         self.enable_blacklist = enable_blacklist
         self.blacklist_duration = blacklist_duration
@@ -328,7 +409,11 @@ class PromptGuard:
         # 内存缓存
         self.blacklist: Dict[str, Tuple[float, str]] = {}
         self.incident_log: List[Dict] = []
-        self.max_log_size = 100
+        # guard.incident_history_size：同样曾是悬空字段，现在真的决定保留多少条
+        try:
+            self.max_log_size = max(1, int(incident_history_size))
+        except (TypeError, ValueError):
+            self.max_log_size = 100
 
         # 后台任务追踪（防止 create_task 泄漏）
         self._background_tasks: set = set()
