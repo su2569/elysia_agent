@@ -35,6 +35,14 @@ class PermissionDenied(Exception):
         self.tool_name = tool_name
 
 
+class AuthPersistenceError(RuntimeError):
+    """权限状态写盘失败（内存态已回滚，原文件未改动）
+
+    单独定义而不是复用 RuntimeError，是为了让接口层能把它和
+    「权限不足」「请求不存在」区分开，如实回 500 而不是谎报成功。
+    """
+
+
 class HighRiskAuthorization:
     """高危操作授权请求"""
     def __init__(self, request_id: str, user_id: str, tool_name: str,
@@ -114,9 +122,15 @@ class AuthManager:
         except Exception as e:
             logger.warning(f"Failed to load auth state: {e}")
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
+        """持久化权限状态，返回是否写盘成功。
+
+        写盘失败**必须**返回 False 并由调用方回滚内存态：否则会出现
+        「管理员点批准、接口回成功、用户当场拿到权限，重启后授权消失」。
+        原子写（临时文件 + fsync + os.replace）保证中途失败不留半截文件。
+        """
+        tmp_path = ""
         try:
-            from pathlib import Path
             os.makedirs(self.data_dir, exist_ok=True)
             data = {
                 "roles": self._roles,
@@ -131,12 +145,23 @@ class AuthManager:
                     for r in self._pending.values()
                 ],
             }
-            Path(self.state_file).write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            target = self.state_file
+            tmp_path = target + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, target)
+            return True
         except Exception as e:
-            logger.warning(f"Failed to save auth state: {e}")
+            logger.error(f"Failed to save auth state: {e}")
+            if tmp_path:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+            return False
 
     # ==================== 角色管理 ====================
 
@@ -149,9 +174,22 @@ class AuthManager:
         return UserRole(self._roles.get(user_id, UserRole.USER))
 
     def set_role(self, user_id: str, role: UserRole) -> None:
-        """设置用户角色（持久化）"""
+        """设置用户角色（持久化）
+
+        写盘失败时回滚内存角色并抛 AuthPersistenceError——宁可这次没生效，
+        也不要「当场提权、重启后回落」这种沉默的权限漂移。
+        """
+        prev = self._roles.get(user_id, None)
+        had_prev = user_id in self._roles
         self._roles[user_id] = int(role)
-        self._save()
+        if not self._save():
+            if had_prev:
+                self._roles[user_id] = prev
+            else:
+                self._roles.pop(user_id, None)
+            raise AuthPersistenceError(
+                f"角色写入失败，{user_id} 的角色未改动"
+            )
 
     def role_hierarchy(self, role: UserRole) -> int:
         return int(role)
@@ -219,7 +257,9 @@ class AuthManager:
             request_id=request_id, user_id=user_id, tool_name=tool_name,
             inputs=dict(inputs or {}), created_at=time.time(),
         )
-        self._save()
+        if not self._save():
+            self._pending.pop(request_id, None)
+            raise AuthPersistenceError("授权请求未能持久化，请检查 data 目录是否可写")
         logger.warning(f"High-risk authorization requested: {user_id} -> {tool_name} (req={request_id})")
         return request_id
 
@@ -230,15 +270,29 @@ class AuthManager:
             return False
         if not self.require_role(approver_id, UserRole.ADMIN):
             raise PermissionDenied("只有管理员或所有者可以审批授权", approver_id, "approve")
+        prev_status, prev_approver, prev_decided = req.status, req.approver_id, req.decided_at
+        auth_key = f"{req.user_id}:{req.tool_name}"
+        had_auth = auth_key in self._authorizations
+        prev_auth = self._authorizations.get(auth_key, 0.0)
+
         req.status = "approved"
         req.approver_id = approver_id
         req.decided_at = time.time()
-        self._authorizations[f"{req.user_id}:{req.tool_name}"] = time.time() + self.auth_ttl
+        self._authorizations[auth_key] = time.time() + self.auth_ttl
         self._history.append({
             "request_id": request_id, "user_id": req.user_id, "tool_name": req.tool_name,
             "action": "approved", "by": approver_id, "at": req.decided_at,
         })
-        self._save()
+        if not self._save():
+            # 回滚：权限状态绝不允许「内存里批了、磁盘上没有」
+            req.status, req.approver_id, req.decided_at = prev_status, prev_approver, prev_decided
+            if had_auth:
+                self._authorizations[auth_key] = prev_auth
+            else:
+                self._authorizations.pop(auth_key, None)
+            if self._history:
+                self._history.pop()
+            raise AuthPersistenceError("授权状态写入失败，本次批准未生效")
         logger.info(f"Authorization approved: {req.user_id} -> {req.tool_name} by {approver_id}")
         return True
 
@@ -249,6 +303,7 @@ class AuthManager:
             return False
         if not self.require_role(approver_id, UserRole.ADMIN):
             raise PermissionDenied("只有管理员或所有者可以审批授权", approver_id, "deny")
+        prev_status, prev_approver, prev_decided = req.status, req.approver_id, req.decided_at
         req.status = "denied"
         req.approver_id = approver_id
         req.decided_at = time.time()
@@ -256,14 +311,24 @@ class AuthManager:
             "request_id": request_id, "user_id": req.user_id, "tool_name": req.tool_name,
             "action": "denied", "by": approver_id, "at": req.decided_at,
         })
-        self._save()
+        if not self._save():
+            req.status, req.approver_id, req.decided_at = prev_status, prev_approver, prev_decided
+            if self._history:
+                self._history.pop()
+            raise AuthPersistenceError("授权状态写入失败，本次拒绝未生效")
         logger.info(f"Authorization denied: {req.user_id} -> {req.tool_name} by {approver_id}")
         return True
 
     def revoke_authorization(self, user_id: str, tool_name: str) -> None:
-        """撤销用户对某工具的授权"""
-        self._authorizations.pop(f"{user_id}:{tool_name}", None)
-        self._save()
+        """撤销用户对某工具的授权（写盘失败回滚并抛 AuthPersistenceError）"""
+        key = f"{user_id}:{tool_name}"
+        had = key in self._authorizations
+        prev = self._authorizations.pop(key, None)
+        if not self._save():
+            if had:
+                self._authorizations[key] = prev
+            raise AuthPersistenceError("授权撤销未能持久化，原授权仍在")
+
 
     # ==================== 查询 ====================
 
