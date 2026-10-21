@@ -686,7 +686,15 @@ class PluginManager:
                 self._persisted[key].remove(name)
                 changed = True
         if changed:
-            self._save_persisted_state()
+            # 写盘失败必须如实上报：插件本身已重载成功，但「解除禁用」的
+            # 持久化没落地，重启后它又会变回禁用态。若在此吞掉返回值，
+            # 接口会回「操作成功」，用户重启后才发现白忙一场。
+            if not self._save_persisted_state():
+                logger.error(
+                    f"Plugin {name} 已重载，但解除禁用的状态未能持久化，"
+                    f"重启后仍会被禁用"
+                )
+                return False
         logger.info(f"Plugin {name} reloaded")
         return True
 
