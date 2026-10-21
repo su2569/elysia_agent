@@ -304,6 +304,7 @@ class PromptManager:
         mood_score: float = 0.5,
         memories: Optional[Dict] = None,
         enable_guard: bool = True,
+        guard_priority: int = 100,
         custom_sections: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
         plugin_segments: Optional[List[PromptSegment]] = None,
@@ -399,9 +400,9 @@ class PromptManager:
                 if section:
                     parts.append((70, section, None))
 
-        # 10. 安全防护（CRITICAL，始终最后）
+        # 10. 安全防护（优先级由 safety.system_prompt_priority 决定，默认 CRITICAL=100）
         if enable_guard:
-            parts.append((100, self.render("system_guard"), None))
+            parts.append((_clamp_guard_priority(guard_priority), self.render("system_guard"), None))
 
         # 预算控制：按优先级排序，超预算裁剪（CRITICAL=100 永不裁剪）
         parts.sort(key=lambda p: p[0], reverse=True)
@@ -527,3 +528,26 @@ class PromptManager:
                 self.build_system_prompt(max_tokens=8192)
             ),
         }
+
+
+def _clamp_guard_priority(value: Any, default: int = 100) -> int:
+    """把 safety.system_prompt_priority 收敛为可排序的数值优先级。
+
+    支持 "highest"/"high"/"normal"/"low" 与整数；非法值回落 default。
+    上界固定 100（与 CRITICAL 同档，不会被预算裁剪），下界 0。
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return max(0, min(100, value))
+    if isinstance(value, str):
+        table = {"highest": 100, "critical": 100, "high": 90, "normal": 70, "medium": 70, "low": 50}
+        key = value.strip().lower()
+        if key in table:
+            return table[key]
+        try:
+            return max(0, min(100, int(key)))
+        except (TypeError, ValueError):
+            return default
+    return default
+
