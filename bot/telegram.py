@@ -72,7 +72,14 @@ class TelegramBotAdapter(BasePlatformAdapter):
     async def stop(self) -> None:
         await super().stop()
         if self._session:
-            self._session.close()
+            # aiohttp 3.x 的 ClientSession.close() 是协程；不 await 会留下
+            # 未关闭的连接池和 "coroutine was never awaited" 警告。
+            try:
+                await self._session.close()
+            except Exception as e:
+                logger.warning(f"Telegram session close failed: {e}")
+            finally:
+                self._session = None
 
     async def send_message(
         self,
