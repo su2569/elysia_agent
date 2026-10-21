@@ -32,6 +32,7 @@ from ..config.prompts import PromptManager
 from ..config.prompt_guard import PromptGuard
 from ..personality.emotion import EmotionEngine
 from ..utils.logger import get_logger
+from ..utils.task_guard import spawn_background_task
 
 logger = get_logger("ElysiaRunner")
 
@@ -919,8 +920,12 @@ class ElysiaRunner:
                 tb = _tb.extract_tb(e.__traceback__)
                 loc = f"{tb[-1].filename}:{tb[-1].lineno}" if tb else "unknown"
                 try:
-                    asyncio.create_task(self.recovery.handle_crash(
-                        module=f"tool:{action}", location=loc, exc=e))
+                    spawn_background_task(
+                        self.recovery.handle_crash(
+                            module=f"tool:{action}", location=loc, exc=e),
+                        name=f"recovery:{action}",
+                        logger=logger,
+                    )
                 except Exception:
                     pass
 

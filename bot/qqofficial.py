@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, Optional
 from .message import BotMessage, MessageFormat
 from .platform_adapter import BasePlatformAdapter, PlatformType
 from ..utils.logger import get_logger
+from ..utils.task_guard import spawn_background_task
 
 logger = get_logger("QQOfficialAdapter")
 
@@ -205,7 +206,10 @@ class QQOfficialBotAdapter(BasePlatformAdapter):
         if t in ("GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"):
             msg = self._parse_official_message(d)
             if msg:
-                asyncio.create_task(self._deliver(msg))
+                spawn_background_task(
+                    self._deliver(msg),
+                    name="qq-deliver",
+                )
 
     async def _deliver(self, msg: BotMessage) -> None:
         """投递消息到处理器"""

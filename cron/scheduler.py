@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional
 from ..utils.logger import get_logger
+from ..utils.task_guard import spawn_background_task
 
 logger = get_logger("Cron")
 
@@ -300,7 +301,13 @@ class CronScheduler:
                         task.next_run = self._compute_next(now, task)
                         continue
                     # 创建独立执行任务（互不阻塞）
-                    asyncio.get_running_loop().create_task(self._fire(task))
+                    # 用 spawn_background_task 而非裸 create_task：_fire 内部虽有
+                    # try/except，但 _save_state 之外的意外（如 asdict 失败）会静默丢任务。
+                    spawn_background_task(
+                        self._fire(task),
+                        name=f"cron-fire:{task.task_id}",
+                        logger=logger,
+                    )
                     task.next_run = self._compute_next(now, task)
                 await asyncio.sleep(self._poll_interval)
             except asyncio.CancelledError:
