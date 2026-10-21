@@ -417,13 +417,20 @@ class SseTransport(ITransport):
     """
 
     def __init__(self, url: str, headers: Optional[Dict[str, str]] = None,
-                 connect_timeout: float = 30.0) -> None:
+                 connect_timeout: float = 30.0,
+                 request_timeout: float = 60.0) -> None:
         super().__init__()
         if aiohttp is None:
             raise MCPError("sse 传输需要 aiohttp: pip install aiohttp")
         self._url = url
         self._extra_headers = dict(headers or {})
         self._connect_timeout = connect_timeout
+        self._request_timeout = request_timeout
+        # 长连接专用超时：total/sock_read 必须为 None。
+        # ClientSession 默认 total=300s，SSE 流会被自己的超时在 5 分钟后掐断。
+        self._stream_timeout = aiohttp.ClientTimeout(
+            total=None, sock_connect=connect_timeout, sock_read=None,
+        )
         self._session: Optional[aiohttp.ClientSession] = None
         self._read_task: Optional[asyncio.Task] = None
         self._endpoint: Optional[str] = None
@@ -433,7 +440,7 @@ class SseTransport(ITransport):
     async def start(self) -> None:
         if self._session is not None:
             return
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=self._stream_timeout)
         self._endpoint_ready = asyncio.Event()
         self._read_task = asyncio.create_task(self._read_stream(), name="mcp-sse-read")
         try:
@@ -497,6 +504,8 @@ class SseTransport(ITransport):
                 self._endpoint,
                 json=message,
                 headers={"Content-Type": "application/json", **self._extra_headers},
+                # 回发是短请求，单独设超时；会话层已放宽为长连接配置
+                timeout=aiohttp.ClientTimeout(total=self._request_timeout),
             ) as resp:
                 # 202 = 已受理；部分实现返回 200 也放行
                 if resp.status not in (200, 202):
@@ -883,7 +892,11 @@ class MCPManager:
             if not url:
                 raise MCPValidationError("sse 传输缺少 url")
             headers = self._cfg_get(cfg, "headers", {}) or {}
-            return SseTransport(url, headers, connect_timeout=self._connect_timeout)
+            return SseTransport(
+                url, headers,
+                connect_timeout=self._connect_timeout,
+                request_timeout=self._request_timeout,
+            )
         raise MCPValidationError(f"未知 MCP 传输类型: {transport}")
 
     def _validate_command(self, command: str) -> None:
