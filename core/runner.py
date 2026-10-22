@@ -7,6 +7,7 @@
 - 最小依赖
 """
 import json
+import os
 import re
 import asyncio
 import time
@@ -63,9 +64,19 @@ class ElysiaRunner:
         self.emotion = emotion_engine
         self.prompts = prompt_manager or PromptManager()
 
+        # 数据目录（配置里可能是相对路径，已在 main._normalize_runtime_paths 归一；
+        # 这里只负责把它传给各 sqlite，避免它们退回模块默认的相对 CWD 路径）
+        self._data_dir = getattr(self.settings, "data_dir", "") or "./data"
+
         # 延迟初始化情绪引擎（如果启用）
         if self.settings.emotion.enabled and self.emotion is None:
-            self.emotion = EmotionEngine(self.settings.emotion)
+            # data_dir 归一后传给 sqlite：此前 EmotionEngine 用模块默认参数
+            # "./data/emotion_cache.sqlite"，相对 CWD。把 data_dir 指到别的盘时，
+            # 情绪库仍留在项目根，形成「一半数据在这里、一半在那里」且两边都不报错。
+            self.emotion = EmotionEngine(
+                self.settings.emotion,
+                db_path=os.path.join(self._data_dir, "emotion_cache.sqlite"),
+            )
 
         # 提示词防护
         self.guard = None
@@ -83,6 +94,8 @@ class ElysiaRunner:
                     self.settings.guard, "enable_anti_harassment", True),
                 incident_history_size=getattr(
                     self.settings.guard, "incident_history_size", 100),
+                # 同上：黑名单库也必须在 data_dir 下
+                db_path=os.path.join(self._data_dir, "guard_blacklist.sqlite"),
             )
 
         self._total_runs = AtomicCounter(0)
