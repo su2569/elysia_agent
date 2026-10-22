@@ -38,6 +38,35 @@ from ..utils.task_guard import spawn_background_task
 logger = get_logger("ElysiaRunner")
 
 
+def _resolve_state_path(state_file, data_dir):
+    """把配置里的相对状态文件路径归到 data_dir 下。
+
+    背景：CronConfig.state_file 默认是 "./data/cron_state.json"，相对 CWD。
+    改 data_dir 后 sqlite 会跟着走、定时任务却留在原地，形成「一半数据在这、
+    一半在那」的静默分裂。这里统一归一到 data_dir。
+
+    绝对路径原样返回（尊重显式配置）；以 ./data/ 或 data/ 开头的剥掉前缀
+    再拼到 data_dir；其余相对路径直接拼；data_dir 为空则保持旧行为。
+    """
+    if not isinstance(state_file, str) or not state_file.strip():
+        return state_file
+    if not isinstance(data_dir, str) or not data_dir.strip():
+        return state_file
+    if os.path.isabs(state_file):
+        return state_file
+
+    rel = state_file.replace("\\", "/").strip()
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if rel.startswith("data/"):
+        rel = rel[5:]
+    elif rel == "data":
+        rel = ""
+    if not rel:
+        return data_dir
+    return os.path.join(data_dir, rel.replace("/", os.sep))
+
+
 class ElysiaRunner:
     """
     Elysia Agent 微内核核心运行器
@@ -228,7 +257,7 @@ class ElysiaRunner:
 
                 self.cron = CronScheduler(
                     runner_run=_cron_run,
-                    state_path=self.settings.cron.state_file,
+                    state_path=_resolve_state_path(self.settings.cron.state_file, self._data_dir),
                     poll_interval=self.settings.cron.poll_interval,
                     misfire_grace_sec=self.settings.cron.misfire_grace_sec,
                 )
@@ -239,7 +268,7 @@ class ElysiaRunner:
                     "定时任务调度器已就绪（poll=%ss, grace=%ss, state=%s）" % (
                         self.settings.cron.poll_interval,
                         self.settings.cron.misfire_grace_sec,
-                        self.settings.cron.state_file,
+                        _resolve_state_path(self.settings.cron.state_file, self._data_dir),
                     )
                 )
             except Exception as e:
