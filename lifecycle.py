@@ -17,10 +17,13 @@
         await some_server_serve()
 """
 import asyncio
+import os
 import signal
 import time
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from .bot.outbox import install as _install_outbox
 from .utils.logger import get_logger
 
 logger = get_logger("Lifecycle")
@@ -179,6 +182,7 @@ class ServiceHost:
         self._by_platform: Dict[int, PlatformSupervisor] = {}
         self._stop_event = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
+        self._outbox_senders: List[Any] = []
         self._closed = False
         self._started = False
 
@@ -205,6 +209,9 @@ class ServiceHost:
             return
         self._started = True
 
+        # 先在平台启动前接上出站队列：这样平台起来后的第一封回信就有记录
+        self._install_outbox()
+
         if self.runner is not None:
             try:
                 await self.runner.start()
@@ -220,10 +227,48 @@ class ServiceHost:
                 except Exception as e:
                     logger.warning(f"平台 {sup.name} 初始启动失败: {e}")
 
+        # 队列重放必须等平台真的连上才有意义
+        await self._replay_outbox()
+
         self._install_loop_exception_handler()
 
         if self.auto_supervise and self.platforms:
             self._tasks.append(asyncio.create_task(self._supervisor_loop(), name="platform-supervisor"))
+
+    # ==================== 可靠投递 ====================
+
+    def _install_outbox(self) -> None:
+        """
+        给每个平台装上 write-ahead 出站队列。
+
+        包装丢消息的窗口在于「进程死得比网络快」：先落盘再发送，
+        重启时才有东西可以重放。
+
+        设 ``ELYBOT_OUTBOX=0`` 可整体关闭（排查问题时的逃生阀）。
+        """
+        if os.environ.get("ELYBOT_OUTBOX", "1") == "0":
+            logger.info("可靠投递已按 ELYBOT_OUTBOX=0 关闭")
+            return
+
+        root = Path(os.environ.get("ELYBOT_DATA_DIR", "data")) / "outbox"
+        for p in self.platforms:
+            if getattr(p, "_outbox", None) is not None:
+                continue  # 重复 start 时不要套两层
+            try:
+                sender = _install_outbox(p, root)
+                self._outbox_senders.append(sender)
+                logger.info(f"平台 {_platform_name(p)} 已接入出站队列: {sender.store.root}")
+            except Exception as e:
+                # 接入失败只是没有队列，不能让平台因此起不来
+                logger.warning(f"平台 {_platform_name(p)} 接入出站队列失败: {e}")
+
+    async def _replay_outbox(self) -> None:
+        """重放上次没发完的消息"""
+        for sender in self._outbox_senders:
+            try:
+                await sender.recover()
+            except Exception as e:
+                logger.warning(f"出站队列重放失败: {e}")
 
     async def stop(self) -> None:
         """优雅停止：停止平台 -> 停止 Runner"""

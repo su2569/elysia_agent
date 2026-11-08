@@ -36,6 +36,9 @@ MAX_AUTO_RELOAD = 2
 
 CRASH_LIMIT_DEFAULT = 20
 CRASH_LIMIT_MAX = 1000
+# 每份历史 crash_report 归档保留的份数。只留 report_file 本身的话，
+# 一次重启就把上一轮崩溃现场覆盖掉，事后无法回溯。
+CRASH_ARCHIVE_KEEP = 10
 
 
 def _coerce_crash_limit(value) -> int:
@@ -110,12 +113,78 @@ class ModuleRecovery:
                 mod = c.get("module", "")
                 if mod and c.get("action") == "give_up":
                     self._disabled.add(mod)
+            if self._crashes:
+                self._log_last_crash()
         except Exception as e:
             logger.warning(f"读取崩溃报告失败（忽略）: {e}")
             # 损坏原件先留档：崩溃报告是 give_up 禁用状态的唯一载体，
             # 被一次正常保存覆盖后无法重建。
             from ..utils.state_file import backup_corrupt_file
             backup_corrupt_file(self.report_file, logger, reason="崩溃报告解析失败")
+        finally:
+            # 读取告一段落后立刻把上一份报告归档，再进入本进程的写入周期。
+            # 损坏的原件上面已经留了 .corrupt 副本，这里失败也不影响启动。
+            self._archive_history()
+
+    def _log_last_crash(self, limit: int = 3) -> None:
+        """启动首屏把上次遗留的崩溃摘要打出来。
+
+        崩溃报告读回来了却没人看，等于只是换了个地方躺着。
+        放在 WARNING 级别，是因为它确实影响当前模块的可用性。
+        """
+        for c in self._crashes[-limit:][::-1]:
+            try:
+                when = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(float(c.get("timestamp") or 0)),
+                )
+            except Exception:
+                when = "?"
+            logger.warning(
+                f"启动自检｜历史崩溃 {when} "
+                f"[{c.get('module', '?')} @ {c.get('location', '?')}] "
+                f"{c.get('exc_type', '?')}: {str(c.get('exc_message', ''))[:120]}"
+            )
+
+    def _archive_history(self) -> None:
+        """把当前 crash_report.json 归档一份，只留最近 CRASH_ARCHIVE_KEEP 份。
+
+        多数重启并不是崩溃引起的，同一份内容没必要反复复制，
+        所以先与最近一份归档比对内容，一致就跳过。
+        """
+        from pathlib import Path
+
+        try:
+            src = Path(self.report_file)
+            if not src.exists() or src.stat().st_size == 0:
+                return
+
+            data = src.read_bytes()
+            archives = sorted(src.parent.glob("crash_report.*.json"))
+            if archives:
+                try:
+                    if archives[-1].read_bytes() == data:
+                        return
+                except OSError:
+                    pass
+
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            dst = src.parent / f"crash_report.{ts}.json"
+            seq = 1
+            while dst.exists():
+                dst = src.parent / f"crash_report.{ts}_{seq}.json"
+                seq += 1
+            dst.write_bytes(data)
+
+            for old in sorted(src.parent.glob("crash_report.*.json"))[:-CRASH_ARCHIVE_KEEP]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            logger.debug(f"崩溃报告已归档: {dst.name}")
+        except Exception as e:
+            # 归档纯属留底，失败绝不能拦住启动
+            logger.debug(f"崩溃报告归档失败（忽略）: {e}")
 
     def _save(self) -> bool:
         """把崩溃报告写入磁盘。
